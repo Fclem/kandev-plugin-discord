@@ -1,34 +1,25 @@
-# kandev plugin manifest — the single declarative contract between your
-# plugin and a kandev host. Everything kandev needs to install, spawn, and
-# route to your plugin is described here. Start by renaming the plugin:
-# change `id`, `display_name`, `description`, and `author` to your own.
+# kandev-plugin-discord manifest — the declarative contract between this plugin
+# and a kandev host. `id` MUST match go.mod's module line, the Makefile BIN
+# name, and the id passed to window.registerKandevPlugin(...) in ui/bundle.js.
 #
-# `id` MUST match the Go module name in go.mod and the id you pass to
-# window.registerKandevPlugin(...) in ui/bundle.js, and it is the prefix of
-# every route kandev serves for you (/api/plugins/<id>/...). Keep the three
-# in sync when you rename.
-id: "kandev-plugin-template"
-api_version: 1
-version: "0.3.0"
-display_name: "Template Plugin"
-description: "Starter template for a kandev native-UI plugin: a nav item + native route, a chat-toolbar action, backend event/webhook handling, and operator settings."
-author: "your-name-here"
-categories: ["tools"]
+# Design: docs/design/spec.md (proposed upstream as
+# kdlbs/kandev docs/specs/integrations/discord.md) and docs/design/plan.md.
+# Capabilities are declared only as features land; the full target set is in
+# the spec's "Plugin manifest" section.
+id: "kandev-plugin-discord"
+api_version: 2
+version: "0.1.0"
+display_name: "Discord"
+description: "One Discord channel per Kandev task: agent updates in the channel, channel messages delivered to the task, and /status, /stop, /approve slash commands."
+author: "Fclem"
+categories: ["connector"]
+repo_url: "https://github.com/Fclem/kandev-plugin-discord"
 
-# min_kandev_version is the oldest kandev release this plugin will install
-# against. A release host compares it to its own version at install time and
-# refuses the package if it is older, so an operator gets a clear error instead
-# of a plugin that loads and then fails on a missing API.
-#
-# Both installed SDK 0.1.0 release records declare the SDK-wide floor 0.99.0.
-# Keep at least this minimum even when using only a subset of SDK features.
-# The SDK version, plugin version, and manifest API version are independent.
+# Floor of the public plugin SDK 0.1.0 (and >= 0.91.1, required by
+# `access: admin` actions). Raise it when this plugin adopts Host additions
+# that ship in a later Kandev release.
 min_kandev_version: "0.99.0"
 
-# runtime.executables maps each supported platform to the binary kandev
-# spawns as a gRPC subprocess. `make package` cross-compiles all five;
-# `make package-host` builds just the current one. The paths are relative to
-# the package root and must match what the Makefile writes into server/.
 runtime:
   type: binary
   executables:
@@ -38,74 +29,85 @@ runtime:
     darwin-arm64: "server/plugin-darwin-arm64"
     windows-amd64: "server/plugin-windows-amd64.exe"
 
-# capabilities gate what the host will do for you. Declare only what you use.
-#   events: WS/backend event types delivered to Plugin.OnEvent (server side).
-#   state:  enables the Host GetState/SetState/... key-value store.
-# Other capabilities exist (e.g. api_read for the Host data API) — see the
-# kandev plugin docs. Remove `events`/`state` if your plugin doesn't need them.
-capabilities:
-  events: ["task.created"]
-  state: true
+# Host-authenticated browser actions. The settings card calls
+# connection.test once per bound workspace; Kandev enforces the admin role
+# before the plugin sees the request.
+actions:
+  - key: "connection.test"
+    scope: "workspace"
+    access: "admin"
+    max_body_bytes: 1024
 
-# Git-provider plugins should opt into recipes/source-control/ as one complete
-# slice. Its provider ownership, actions, reference source, and extra Host
-# capabilities are intentionally absent here so generated plugins do not claim
-# a fake provider or permissions they do not use.
-
-# webhooks kandev proxies to Plugin.HandleWebhook at
-# POST /api/plugins/<id>/webhooks/<key>. Delete this block if unused.
-#
-# Always spell `access` out. API v1 keeps the legacy `public` default for
-# compatibility. API v2 defaults to `authenticated`. This template remains on
-# API v1 and declares its existing public behavior explicitly.
-#
-# Pick the value deliberately; the two are for different callers:
-#   public         anonymous callers. Correct for a webhook a third party
-#                  delivers to (GitHub, Slack, Stripe) — those senders have no
-#                  kandev identity to present. Your handler owns its own
-#                  verification (signature header, shared secret in a `secret:`
-#                  config field). Body limit is capped at 4 MiB.
-#   authenticated  requires a kandev identity (session cookie or PAT). Correct
-#                  for a webhook only your own scripts or CI call. Raises the
-#                  max_body_bytes ceiling to 16 MiB.
-#
-# This example is `public` because it exists to demonstrate the external
-# delivery path — that is what makes it curl-able from anywhere with no
-# credential, which is exactly why a real public webhook must authenticate its
-# caller itself.
-#
-# If what you actually want is to call your plugin from your OWN frontend
-# bundle, neither value is right: use an `actions:` entry instead. The host
-# authenticates and authorizes those, and host.api.fetch is documented as MUST
-# NOT target a public webhook path.
-webhooks:
-  - key: "ping"
-    description: "Example inbound webhook; logs the delivery and returns 200."
-    method: "POST"
-    access: "public"
-
-# ui.bundle points at your hand-written, no-build ES module frontend half.
-# Remove this section for a backend-only plugin.
 ui:
   bundle: "/ui/bundle.js"
 
-# config_schema declares operator-editable settings, rendered as a form at
-# Settings > Plugins > <display_name>. The plugin process reads saved values
-# through the Host GetConfig RPC (see greeting() in server/plugin.go, which
-# uses it to build the webhook reply). Fields marked `secret: true` render as
-# password inputs, are stored in kandev's encrypted vault, and are masked
-# everywhere except inside the plugin process. Delete this block if your
-# plugin has no settings.
+# Operator settings, rendered at Settings > Plugins > Discord. Saving restarts
+# the plugin. Secret fields are vault-stored and masked outside the plugin.
 config_schema:
   type: object
   properties:
-    greeting:
+    bot_token:
       type: string
-      title: "Greeting"
-      description: "Word the ping webhook reply starts with (empty = \"Hello\")."
-      default: "Hello"
-    api_token:
-      type: string
-      title: "API token"
-      description: "Example secret setting: masked in the UI and on the operator API, cleartext only inside the plugin process."
       secret: true
+      title: "Bot token"
+      description: "Discord Developer Portal > your application > Bot > Reset Token."
+    application_id:
+      type: string
+      title: "Application ID"
+      description: "Discord Developer Portal > your application > General Information > Application ID."
+    workspace_guilds:
+      type: string
+      title: "Workspace → server bindings"
+      description: "One `<kandev workspace id>=<discord server id>` pair per line (or comma-separated). Each workspace and each server may appear once."
+    operator_role_name:
+      type: string
+      title: "Operator role"
+      description: "Discord role allowed to message tasks and run /stop and /approve."
+      default: "Kandev Operator"
+    viewer_role_name:
+      type: string
+      title: "Viewer role (optional)"
+      description: "Discord role that may read task channels but not write."
+    allowed_user_ids:
+      type: string
+      title: "Extra operator user IDs (optional)"
+      description: "Comma-separated Discord user IDs treated as operators without the role."
+    kandev_base_url:
+      type: string
+      title: "Kandev base URL (optional)"
+      description: "Public URL of this Kandev instance, used for deep links in channel topics."
+    close_trigger:
+      type: string
+      title: "Close channels when"
+      enum: ["archived", "terminal"]
+      default: "archived"
+    closed_channel_action:
+      type: string
+      title: "Closed channel action"
+      enum: ["archive", "delete"]
+      default: "archive"
+    archive_retention_days:
+      type: integer
+      title: "Archive retention (days, 0 = keep)"
+      default: 30
+    mirror_user_messages:
+      type: boolean
+      title: "Mirror Kandev user messages to Discord"
+      default: true
+    post_tool_activity:
+      type: boolean
+      title: "Post tool-call summaries"
+      default: false
+    live_update_interval_seconds:
+      type: integer
+      title: "Mid-turn update interval (seconds, 0 = turn end only)"
+      default: 30
+    inbound_catchup_max_age_minutes:
+      type: integer
+      title: "Deliver missed Discord messages up to (minutes)"
+      default: 15
+    include_ephemeral_tasks:
+      type: boolean
+      title: "Include quick-chat tasks"
+      default: false
+  required: ["bot_token", "application_id", "workspace_guilds"]

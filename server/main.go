@@ -1,14 +1,10 @@
-// Command kandev-plugin-template is the backend half of this kandev plugin.
-// It implements pluginsdk.Plugin (see plugin.go) and is spawned by kandev as
-// a gRPC subprocess — there is no HTTP server, no listen address, and no
-// secrets to configure: pluginsdk.Serve owns the entire transport.
-//
-// To make this your own, rename `templatePlugin` in plugin.go (and keep the
-// id in manifest.yaml, go.mod's module line, and ui/bundle.js in sync).
+// Command kandev-plugin-discord is the backend half of the Discord plugin.
+// Kandev spawns it as a go-plugin gRPC subprocess; pluginsdk.Serve owns the
+// transport.
 package main
 
 import "github.com/kdlbs/kandev/pluginsdk"
 
 func main() {
-	pluginsdk.Serve(&templatePlugin{})
+	pluginsdk.Serve(newDiscordPlugin())
 }

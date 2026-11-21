@@ -34,7 +34,7 @@ jobs:
           cache: npm
           cache-dependency-path: plugin/package-lock.json
 
-      - name: Install recipe test dependencies
+      - name: Install test dependencies
         working-directory: plugin
         run: npm ci --ignore-scripts
 
@@ -60,4 +60,4 @@ jobs:
         working-directory: plugin
         run: |
           make test
-          make audit-recipes
+          make audit

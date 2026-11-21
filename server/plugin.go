@@ -2,106 +2,71 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
 	"log"
 
 	"github.com/kdlbs/kandev/pluginsdk"
+
+	"kandev-plugin-discord/server/config"
+	"kandev-plugin-discord/server/discord"
+	"kandev-plugin-discord/server/health"
 )
 
-// eventCountStateKey is the Host state key this template uses to demonstrate
-// the GetState/SetState round trip: every task.created delivery increments a
-// persistent counter kept in kandev's state store, scoped to this plugin
-// instance. Delete this (and OnEvent) if your plugin doesn't handle events.
-const eventCountStateKey = "event_count"
+// actionConnectionTest is the manifest action the settings card invokes.
+// Kandev authenticates the caller, enforces `access: admin`, and verifies the
+// workspace before the request reaches the plugin.
+const actionConnectionTest = "connection.test"
 
-// templatePlugin implements pluginsdk.Plugin (via UnimplementedPlugin). It is
-// the one type you customize on the backend side: embed UnimplementedPlugin
-// for no-op defaults, then override only the RPCs you need
-// (OnEvent / HandleWebhook). Rename it to match your plugin.
-type templatePlugin struct {
+// discordPlugin is the plugin backend. Today it serves the settings card's
+// connection test; the gateway bridge lands per docs/design/plan.md.
+type discordPlugin struct {
 	pluginsdk.UnimplementedPlugin
+
+	// newAPI builds the Discord client for a token; replaced in tests.
+	newAPI func(token string) health.API
 }
 
-var _ pluginsdk.Plugin = (*templatePlugin)(nil)
+var (
+	_ pluginsdk.Plugin        = (*discordPlugin)(nil)
+	_ pluginsdk.ActionHandler = (*discordPlugin)(nil)
+)
 
-// OnEvent is called for every event type declared in manifest.yaml's
-// capabilities.events. Here it logs the delivery and, when a Host has been
-// injected, increments a persistent counter through Host state. Returning an
-// error asks kandev to retry the delivery; return nil to acknowledge.
-func (p *templatePlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
-	log.Printf("event delivered: type=%s id=%s", e.EventType, e.EventID)
+func newDiscordPlugin() *discordPlugin {
+	return &discordPlugin{newAPI: func(token string) health.API { return discord.NewClient(token) }}
+}
 
+// HandleAction serves host-authenticated browser actions.
+func (p *discordPlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	if req.ActionKey != actionConnectionTest {
+		return jsonResponse(404, map[string]string{"error": "unknown action"}), nil
+	}
 	host := p.Host()
 	if host == nil {
-		// Host not injected yet (e.g. the broker dial is still in
-		// progress) — nothing more to do for this delivery.
-		return nil
+		return jsonResponse(503, map[string]string{"error": "plugin is still starting; retry"}), nil
 	}
-
-	count, err := incrementEventCount(ctx, host)
+	raw, err := host.GetConfig(ctx)
 	if err != nil {
-		return fmt.Errorf("kandev-plugin-template: updating event count in Host state: %w", err)
+		log.Printf("connection.test: reading config: %v", err)
+		return jsonResponse(503, map[string]string{"error": "could not read plugin settings"}), nil
 	}
-	log.Printf("events counted via Host state: %d", count)
-	return nil
+	cfg, cfgErr := config.Parse(raw)
+	var api health.API
+	if cfg.BotToken != "" {
+		api = p.newAPI(cfg.BotToken)
+	}
+	result := health.Test(ctx, api, cfg, cfgErr, req.Context.WorkspaceID)
+	log.Printf("connection.test: workspace=%s ok=%t", req.Context.WorkspaceID, result.OK)
+	return jsonResponse(200, result), nil
 }
 
-// incrementEventCount reads the current count from Host state (0 if unset),
-// writes back count+1, and returns the new count. Note numbers come back from
-// Host state as float64 (the values round-trip through a protobuf Struct on
-// the wire), so read them as float64 before converting.
-func incrementEventCount(ctx context.Context, host pluginsdk.Host) (int, error) {
-	value, found, err := host.GetState(ctx, "instance", "", eventCountStateKey)
+func jsonResponse(status int, body any) *pluginsdk.PluginActionResponse {
+	raw, err := json.Marshal(body)
 	if err != nil {
-		return 0, fmt.Errorf("reading %s: %w", eventCountStateKey, err)
+		return &pluginsdk.PluginActionResponse{Status: 500, Body: []byte(`{"error":"encoding response"}`)}
 	}
-
-	count := 0
-	if found {
-		if c, ok := value["count"].(float64); ok {
-			count = int(c)
-		}
+	return &pluginsdk.PluginActionResponse{
+		Status:  status,
+		Body:    raw,
+		Headers: map[string]string{"Content-Type": "application/json"},
 	}
-	count++
-
-	if err := host.SetState(ctx, "instance", "", eventCountStateKey, map[string]any{"count": count}); err != nil {
-		return 0, fmt.Errorf("writing %s: %w", eventCountStateKey, err)
-	}
-	return count, nil
-}
-
-// HandleWebhook implements the webhooks declared in manifest.yaml. kandev
-// proxies POST /api/plugins/<id>/webhooks/<key> here; dispatch on
-// req.WebhookKey and return the status/body kandev should send back. This one
-// answers with a greeting built from the operator-configured settings, to
-// show a config read end to end.
-func (p *templatePlugin) HandleWebhook(ctx context.Context, req *pluginsdk.WebhookRequest) (*pluginsdk.WebhookResponse, error) {
-	log.Printf("webhook received: key=%s method=%s body=%s", req.WebhookKey, req.Method, string(req.Body))
-	body := fmt.Sprintf("%s, webhook!", p.greeting(ctx))
-	return &pluginsdk.WebhookResponse{Status: 200, Body: []byte(body)}, nil
-}
-
-// greeting reads this plugin's operator-editable settings through the Host
-// GetConfig RPC — the values saved on the plugin's settings page (the
-// manifest's config_schema). kandev restarts the plugin process whenever the
-// operator saves, so reading on demand always observes the current values.
-// Config is best-effort here: with no Host injected yet, or on an RPC error,
-// the greeting falls back to "Hello". A secret field like api_token arrives
-// in cleartext through this same call — the only surface where its real value
-// is visible.
-func (p *templatePlugin) greeting(ctx context.Context) string {
-	const fallback = "Hello"
-	host := p.Host()
-	if host == nil {
-		return fallback
-	}
-	config, err := host.GetConfig(ctx)
-	if err != nil {
-		log.Printf("reading plugin config: %v", err)
-		return fallback
-	}
-	if greeting, _ := config["greeting"].(string); greeting != "" {
-		return greeting
-	}
-	return fallback
 }

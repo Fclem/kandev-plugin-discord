@@ -195,7 +195,7 @@ jobs:
           make check-format
           make vet
           make test
-          make audit-recipes
+          make audit
           make verify-package
           PACKAGE_FILE="$(make --no-print-directory -s package-file)"
           sh scripts/verify-release-version.sh "$TAG" "$PACKAGE_FILE"
@@ -285,7 +285,7 @@ jobs:
           make check-format
           make vet
           make test
-          make audit-recipes
+          make audit
           make verify-package
           PACKAGE_FILE="$(make --no-print-directory -s package-file)"
           sh scripts/verify-release-version.sh "$TAG" "$PACKAGE_FILE"

@@ -1,13 +1,13 @@
 .DEFAULT_GOAL := build
 
-.PHONY: build run test test-backend test-recipes test-ui test-package-verifier \
-	test-release-version typecheck-recipes audit-recipes check-format fmt vet \
+.PHONY: build run test test-backend test-ui test-package-verifier \
+	test-release-version audit check-format fmt vet \
 	sdk-check package package-host package-file verify-package verify-package-host clean
 
-# When you rename the plugin, update BIN and VERSION to match manifest.yaml's
-# id and version (PKG_OUT is derived from them).
-BIN := bin/kandev-plugin-template
-VERSION := 0.3.0
+# BIN and VERSION must match manifest.yaml's id and version (PKG_OUT is
+# derived from them; scripts/verify-release-version.sh enforces the match).
+BIN := bin/kandev-plugin-discord
+VERSION := 0.1.0
 STAGE := .build/stage
 PKG_OUT := $(notdir $(BIN))-$(VERSION).tar.gz
 
@@ -24,7 +24,7 @@ sdk-check:
 ## itself always installs from `make package`/`package-host` output, not this.
 build: sdk-check
 	mkdir -p bin
-	go build -o $(BIN) ./server/...
+	go build -o $(BIN) ./server
 
 ## Build + run. Mainly for -race / manual smoke checks: kandev normally spawns
 ## this binary itself via the go-plugin handshake, so a manually-started
@@ -32,13 +32,10 @@ build: sdk-check
 run: build
 	./$(BIN)
 
-test: test-backend typecheck-recipes test-recipes test-ui test-package-verifier test-release-version
+test: test-backend test-ui test-package-verifier test-release-version
 
 test-backend:
-	go test ./server/... ./recipes/source-control/server/...
-
-test-recipes:
-	npm run test:recipes
+	go test ./server/...
 
 test-ui:
 	npm run test:ui
@@ -49,20 +46,17 @@ test-package-verifier:
 test-release-version:
 	sh scripts/test-verify-release-version.sh
 
-typecheck-recipes:
-	npm run typecheck:recipes
-
-audit-recipes:
+audit:
 	npm audit --audit-level=high
 
 fmt:
-	gofmt -l server recipes
+	gofmt -l server
 
 check-format:
-	@test -z "$$(gofmt -l server recipes)" || { echo "gofmt needed:"; gofmt -l server recipes; exit 1; }
+	@test -z "$$(gofmt -l server)" || { echo "gofmt needed:"; gofmt -l server; exit 1; }
 
 vet:
-	go vet ./server/... ./recipes/source-control/server/...
+	go vet ./server/...
 
 ## Cross-compile server/plugin-<goos>-<goarch>[.exe] for every platform in
 ## manifest.yaml's runtime.executables, stage manifest.yaml + ui/ alongside

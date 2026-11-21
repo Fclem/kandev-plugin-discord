@@ -64,11 +64,3 @@ jobs:
       - name: Package and validate all supported platforms
         working-directory: plugin
         run: make verify-package
-
-      - name: Install smoke-test browser
-        working-directory: plugin
-        run: npx playwright install --with-deps chromium
-
-      - name: Smoke package on the published SDK minimum host
-        working-directory: plugin
-        run: sh scripts/test-minimum-host.sh
