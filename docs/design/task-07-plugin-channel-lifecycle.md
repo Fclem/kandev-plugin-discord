@@ -1,7 +1,7 @@
 ---
 id: "07-plugin-channel-lifecycle"
 title: "Task channel create, rename, close, reopen, retention"
-status: pending
+status: done
 wave: 3
 depends_on: ["06-plugin-gateway-provisioning"]
 plan: "plan.md"
@@ -50,4 +50,24 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **`server/channels`.** `Name` (NFKD slug, ASCII `[a-z0-9-]`, ≤ 100,
+  `task-<id>` fallback), `Topic` (title · identifier · parent · link,
+  ≤ 1024), `WantOpen`, and `Manager.Sync` implementing the state machine:
+  create (task overwrites, inbound cursor = channel ID, outbound cursor =
+  task creation but at most 10 minutes back), capacity (`30013` →
+  `capacity_blocked`, one `#kandev-status` note, retried by later syncs),
+  403/404 → `failed` (retried once per process), category rollover at 50
+  (`Kandev Tasks 2`, saved to the guild record), rename/topic debounce
+  (10 min, deferred retry, latest title), archive (archive category,
+  read-only overwrites, `delete_after`), delete action, reopen, retention
+  delete, terminal close trigger, and recreation with a note after a
+  manual delete.
+- **Bridge.** Per-task `Kick` (coalesced, on the task queue), delayed
+  kicks (`kickAfter`), `syncTask`, `HandleEvent` (event-ID LRU, `task_id`
+  or session lookup), `CHANNEL_DELETE` → record `deleted` and index
+  removed; `OnEvent` forwards to the bridge.
+- **Tests:** `go test -race ./server/...` passed (`channels`: naming,
+  topic, create-once, backlog cursor, capacity note once, failed retry per
+  process, rollover, rename debounce, archive/reopen/retention,
+  delete/terminal, recreation; `bridge`: event-driven create/dedupe/archive,
+  channel delete).

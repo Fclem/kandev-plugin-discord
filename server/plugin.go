@@ -94,6 +94,16 @@ func (p *discordPlugin) currentBridge() *bridge.Bridge {
 	return p.bridge
 }
 
+// OnEvent forwards Kandev events to the running bridge. Events are only
+// triggers, so dropping them before the bridge starts loses nothing: the
+// first reconcile after READY catches up.
+func (p *discordPlugin) OnEvent(ctx context.Context, e *pluginsdk.Event) error {
+	if b := p.currentBridge(); b != nil {
+		b.HandleEvent(ctx, e)
+	}
+	return nil
+}
+
 // HandleAction serves host-authenticated browser actions.
 func (p *discordPlugin) HandleAction(ctx context.Context, req *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
 	if req.ActionKey != actionConnectionTest && req.ActionKey != actionConnectionStatus {

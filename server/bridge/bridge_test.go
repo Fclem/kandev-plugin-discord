@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/kdlbs/kandev/pluginsdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -88,4 +89,61 @@ func TestGuildCreateProvisionsBoundGuildOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, ok)
 	assert.Equal(t, guildID, g.GuildID)
+}
+
+func (h *harness) addTask(id, title string) {
+	h.host.AddTask(pluginsdk.Task{ID: id, WorkspaceID: wsID, Identifier: "KAN-" + id, Title: title, State: "IN_PROGRESS", CreatedAt: "2026-11-25T11:59:00Z"})
+}
+
+func (h *harness) event(t *testing.T, id, typ string, payload map[string]any) {
+	t.Helper()
+	h.b.HandleEvent(context.Background(), &pluginsdk.Event{EventID: id, EventType: typ, WorkspaceID: wsID, Payload: payload})
+	h.wait()
+}
+
+func (h *harness) channel(t *testing.T, taskID string) store.Channel {
+	t.Helper()
+	rec, ok, err := h.st.Channel(context.Background(), taskID)
+	require.NoError(t, err)
+	require.True(t, ok, "channel record for %s", taskID)
+	return rec
+}
+
+func TestTaskEventsDriveTheChannelLifecycle(t *testing.T) {
+	h := newHarness(t)
+	h.ready(t)
+	h.addTask("1", "Fix login")
+	h.api.ResetCalls()
+
+	h.event(t, "e1", "task.created", map[string]any{"task_id": "1", "workspace_id": wsID})
+	rec := h.channel(t, "1")
+	assert.Equal(t, store.StatusActive, rec.Status)
+	assert.Equal(t, "kan-1-fix-login", h.api.Channels[rec.ChannelID].Name)
+	ix, ok, err := h.st.ChannelIndex(context.Background(), rec.ChannelID)
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, "1", ix.TaskID)
+
+	h.event(t, "e1", "task.created", map[string]any{"task_id": "1"})
+	h.event(t, "e2", "task.updated", map[string]any{"task_id": "1"})
+	assert.Len(t, h.api.CallsTo("GuildChannelCreate"), 1, "duplicate and no-op events create nothing")
+
+	archived := "2026-11-25T12:00:00Z"
+	h.host.Tasks["1"].ArchivedAt = &archived
+	h.event(t, "e3", "task.updated", map[string]any{"task_id": "1", "archived_at": archived})
+	assert.Equal(t, store.StatusArchived, h.channel(t, "1").Status)
+}
+
+func TestDiscordChannelDeleteMarksRecordDeleted(t *testing.T) {
+	h := newHarness(t)
+	h.ready(t)
+	h.addTask("1", "Fix login")
+	h.event(t, "e1", "task.created", map[string]any{"task_id": "1"})
+	rec := h.channel(t, "1")
+
+	h.b.onChannelDelete(context.Background(), &discordgo.Channel{ID: rec.ChannelID})
+	h.wait()
+	assert.Equal(t, store.StatusDeleted, h.channel(t, "1").Status)
+	_, ok, _ := h.st.ChannelIndex(context.Background(), rec.ChannelID)
+	assert.False(t, ok)
 }

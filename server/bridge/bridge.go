@@ -39,17 +39,21 @@ type Bridge struct {
 	st     *store.Store
 	halted func() bool
 	now    func() time.Time
+	// started is the process start, after which `failed` channels retry.
+	started time.Time
 
 	ctx    context.Context
 	sched  *Scheduler
 	timers timers
 	events *lru
 
-	mu        sync.Mutex
-	botUserID string
-	guilds    map[string]store.Guild // workspace → provisioned record
-	health    store.Health
-	syncing   map[string]bool // task → sync queued
+	mu           sync.Mutex
+	botUserID    string
+	guilds       map[string]store.Guild // workspace → provisioned record
+	health       store.Health
+	syncing      map[string]bool   // task → sync queued
+	queueCounts  map[string]int    // session → queued messages
+	sessionTasks map[string]string // session → task
 }
 
 // New returns an idle bridge; Run starts it.
@@ -61,7 +65,7 @@ func New(d Deps) *Bridge {
 		d.Halted = func() bool { return false }
 	}
 	b := &Bridge{
-		cfg: d.Config, api: d.API, host: d.Host, st: d.Store, halted: d.Halted, now: d.Now,
+		cfg: d.Config, api: d.API, host: d.Host, st: d.Store, halted: d.Halted, now: d.Now, started: d.Now(),
 		events:  newLRU(4096),
 		guilds:  map[string]store.Guild{},
 		syncing: map[string]bool{},
@@ -98,6 +102,7 @@ func (b *Bridge) Run(ctx context.Context, sess *discordgo.Session) gateway.State
 		b.onReady(ctx, r)
 	})
 	sess.AddHandler(func(_ *discordgo.Session, g *discordgo.GuildCreate) { b.onGuildCreate(ctx, g.Guild) })
+	sess.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) { b.onChannelDelete(ctx, c.Channel) })
 	sess.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
 	final := sup.Run(ctx)
 	b.timers.stopAll()

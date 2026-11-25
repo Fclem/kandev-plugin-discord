@@ -223,7 +223,7 @@ Wave 2:
 
 Wave 3:
 - [x] [task-15-host-delegated-human-responses](task-15-host-delegated-human-responses.md)  (#5438)
-- [ ] [task-07-plugin-channel-lifecycle](task-07-plugin-channel-lifecycle.md)
+- [x] [task-07-plugin-channel-lifecycle](task-07-plugin-channel-lifecycle.md)
 
 Wave 4:
 - [x] [task-16-host-step-approval-rpcs](task-16-host-step-approval-rpcs.md)  (#5438)
