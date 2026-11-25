@@ -106,7 +106,11 @@ func Test(ctx context.Context, api API, cfg config.Config, cfgErr error, workspa
 	binding, bound := cfg.BindingFor(workspaceID)
 	switch {
 	case cfg.BotToken == "":
-		r.add(CheckConfig, Fail, configDetail("bot_token is required", cfgErr))
+		detail := "bot_token is required"
+		if cfgErr != nil {
+			detail = cfgErr.Error() // already names bot_token among the problems
+		}
+		r.add(CheckConfig, Fail, detail)
 		r.skipRest(CheckToken, CheckApplication, CheckIntent, CheckMembership, CheckPermissions)
 		return r.done()
 	case !bound:
