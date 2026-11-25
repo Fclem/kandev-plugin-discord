@@ -89,6 +89,9 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	if res.RetryAfter > 0 {
 		b.kickAfter(taskID, res.RetryAfter)
 	}
+	if task != nil && res.Rec.Status == store.StatusActive {
+		b.syncActive(ctx, task, res.Rec)
+	}
 }
 
 func (b *Bridge) parentIdentifier(ctx context.Context, task *pluginsdk.Task) string {

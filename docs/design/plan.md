@@ -228,7 +228,7 @@ Wave 3:
 Wave 4:
 - [x] [task-16-host-step-approval-rpcs](task-16-host-step-approval-rpcs.md)  (#5438)
 - [x] [task-08-plugin-reconciler](task-08-plugin-reconciler.md)
-- [ ] [task-09-plugin-outbound-mirroring](task-09-plugin-outbound-mirroring.md)
+- [x] [task-09-plugin-outbound-mirroring](task-09-plugin-outbound-mirroring.md)
 
 Wave 5:
 - [x] [task-04-host-plugin-docs](task-04-host-plugin-docs.md)  (#5438)

@@ -147,3 +147,31 @@ func TestDiscordChannelDeleteMarksRecordDeleted(t *testing.T) {
 	_, ok, _ := h.st.ChannelIndex(context.Background(), rec.ChannelID)
 	assert.False(t, ok)
 }
+
+func (h *harness) texts(channelID string) []string {
+	var out []string
+	for _, m := range h.api.SentMessages(channelID) {
+		if m.Content != "" {
+			out = append(out, m.Content)
+		}
+	}
+	return out
+}
+
+func TestTurnCompletedMirrorsAgentOutputWithoutEchoes(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	h.host.Sessions["1"] = []pluginsdk.Session{{ID: "s1", TaskID: "1", State: "WAITING_FOR_INPUT", AgentDisplayName: "Claude"}}
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", SessionID: "s1", AuthorType: "user", Type: "message", Content: "alice (Discord): go", Source: "plugin:kandev-plugin-discord", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.host.AddMessage(pluginsdk.Message{ID: "m2", TaskID: "1", SessionID: "s1", AuthorType: "agent", Type: "thinking", Content: "secret plan", CreatedAt: "2026-11-25T12:00:02Z"})
+	h.host.AddMessage(pluginsdk.Message{ID: "m3", TaskID: "1", SessionID: "s1", AuthorType: "agent", Type: "message", Content: "Fixed it.", CreatedAt: "2026-11-25T12:00:03Z"})
+
+	h.event(t, "e1", "turn.completed", map[string]any{"task_id": "1", "session_id": "s1"})
+	assert.Equal(t, []string{"Fixed it."}, h.texts(rec.ChannelID))
+	assert.Equal(t, "m3", h.channel(t, "1").OutboundCursor.IDs[0])
+
+	h.event(t, "e2", "task_session.state_changed", map[string]any{"session_id": "s1"})
+	assert.Equal(t, []string{"Fixed it."}, h.texts(rec.ChannelID), "session-only event maps to the task; nothing new")
+}

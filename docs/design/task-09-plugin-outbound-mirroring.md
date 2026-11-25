@@ -1,7 +1,7 @@
 ---
 id: "09-plugin-outbound-mirroring"
 title: "Kandev → Discord mirroring"
-status: pending
+status: done
 wave: 4
 depends_on: ["07-plugin-channel-lifecycle", "17-host-message-source"]
 plan: "plan.md"
@@ -48,4 +48,27 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **`server/outbound`.** `Mirror.Sync` pulls `Messages().List`
+  (`TaskIDs=[task]`, `Since=cursor`, paginated), orders by parsed
+  `CreatedAt`, skips IDs already posted at the cursor timestamp, holds back
+  the newest agent message of a running session, renders, posts, and saves
+  the cursor after each posted message. `Render` posts agent
+  `message`/`content`, user messages only with `mirror_user_messages` and
+  `Source != plugin:kandev-plugin-discord`, `tool_*` one-liners only with
+  `post_tool_activity`, never `thinking`. `Chunk` splits ≤ 2000 bytes on
+  lines, closes/reopens code fences, hard-splits on rune boundaries;
+  `Limit` caps at 5 chunks plus a truncation line with the deep link.
+  `StatusLines` posts started / turn complete / completed / failed /
+  stopped; `Card` (state, step, queue, pending, sessions) is sent and
+  pinned once, then edited only on a content-hash change, ≥ 10 s apart.
+- **Mentions.** `discordapi.Client` forces `allowed_mentions.parse=[]` on
+  every send and edit (tested in task-05).
+- **Bridge.** `syncActive` runs after the channel lifecycle: sessions
+  (also mapping session → task for session-only events), pending count,
+  cached step names (5 min), queue depth from
+  `message.queue.status_changed`, debounce retries, and a live-update kick
+  every `live_update_interval_seconds` while a session runs.
+- **Tests:** `go test -race ./server/...` passed (chunking, fences, rune
+  splits, cap; render filters incl. echo suppression; status transitions;
+  ordering, tie-break cursor, duplicate trigger; hold-back; truncation
+  link; card pin/debounce; bridge turn.completed mirroring).

@@ -51,9 +51,10 @@ type Bridge struct {
 	botUserID    string
 	guilds       map[string]store.Guild // workspace → provisioned record
 	health       store.Health
-	syncing      map[string]bool   // task → sync queued
-	queueCounts  map[string]int    // session → queued messages
-	sessionTasks map[string]string // session → task
+	syncing      map[string]bool      // task → sync queued
+	queueCounts  map[string]int       // session → queued messages
+	sessionTasks map[string]string    // session → task
+	steps        map[string]stepCache // workflow → step names
 }
 
 // New returns an idle bridge; Run starts it.
