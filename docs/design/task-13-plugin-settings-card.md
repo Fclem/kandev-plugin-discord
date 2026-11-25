@@ -1,64 +1,48 @@
 ---
 id: "13-plugin-settings-card"
-title: "Quick-setup settings card with connection test"
+title: "Quick-setup settings card with connection test and status"
 status: in_progress
 wave: 6
 depends_on: ["06-plugin-gateway-provisioning"]
 plan: "plan.md"
-spec: "spec.md"
+requirements:
+  - REQ-INTEGRATIONS-DISCORD-009
+acceptance_criteria:
+  - AC-INTEGRATIONS-DISCORD-009.1
+  - AC-INTEGRATIONS-DISCORD-009.2
+  - AC-INTEGRATIONS-DISCORD-009.3
+system_design:
+  - system-design.md
 ---
 
-# Task 13: Quick-setup settings card with connection test
+# Task 13: Quick-setup settings card
 
 Repository: `Fclem/kandev-plugin-discord`. Use `/mobile-parity` and `/tdd`.
 
 - **Acceptance:**
-  1. `ui/bundle.js` registers one `plugin-settings` component. It sits above
-     Kandev's admin-only schema form, which edits the token, application ID,
-     and `workspace_guilds`. The card shows:
-     - workspace IDs from `host.store`, with "Copy line";
-     - bindings parsed from `GET /api/plugins/{id}/config` (masked) using the
-       same one-to-one snowflake rules as the backend;
-     - an invite link per binding.
-  2. **Test** calls `host.api.invokeAction("connection.test", { workspaceId })`
-     per binding. The backend `server/health` returns:
-     - token validity (`GET /users/@me`);
-     - the application match and Message Content intent (`GET /applications/@me`
-       flags);
-     - membership and missing permissions (`GET /users/@me/guilds`);
-     - an invite URL when needed;
-     - once task-06 lands, gateway state (`4014`/`4004`), cached in
-       `instance/health` and served without Discord calls by
-       `connection.status`.
-
-     Results contain no token material. Both actions are
-     `access: admin, scope: workspace`.
-  3. **Lifecycle and layout.** `initialize`/`destroy` can run twice without
-     duplicate registrations or pollers. The layout is touch-usable on phone
-     width.
-- **Verification:** `make test && make verify-package-host` (see the repo `AGENTS.md` for the tooling checkout `verify-package-host` needs).
-- **Files likely touched:** `ui/bundle.js`, `ui/*.css`, `tests/*.test.js`, `server/health/{health.go,health_test.go}`, `server/plugin.go` (action handler), `manifest.yaml` (`actions`).
+  1. `ui/bundle.js` registers one `plugin-settings` card (above Kandev's
+     schema form and the host's "Linked chat accounts" card): workspace IDs
+     with "Copy line", bindings parsed with the backend rules, an invite link
+     per binding, and a short note on the grants and `/link`.
+  2. **Test connection** (`connection.test`) reports token, application,
+     Message Content intent, membership, permissions, an invite URL when
+     needed, and the gateway state from the cached health record
+     (`4014` → "disallowed intent", `4004` → "token rejected"). Each binding
+     row also shows the cached state from `connection.status`, which makes no
+     Discord call. Neither result contains token material.
+  3. `initialize`/`destroy` can run twice without duplicate registrations or
+     pollers; the layout is usable at phone width (wrapping rows, ≥ 36 px
+     touch targets).
+- **Verification:** `make test` (node contract tests) and
+  `make verify-package-host SDK_GATE=` with the tooling checkout.
+- **Files:** `ui/bundle.js`, `tests/settings-card.test.js`, `server/health/*`, `server/plugin.go`, `manifest.yaml`.
 - **Dependencies:** task-06.
-- **Parallelism:** parallel-safe with tasks 07–12, except for `server/plugin.go` wiring.
-- **Inputs:**
-  - Spec "Quick setup and connection test" and the setup scenario.
-  - `docs/public/plugins-authoring.md` "Authenticated declared actions" and
-    "Plugin settings page".
-- **Risks:**
-  - Saving restarts the plugin, and actions fail while it restarts. Retry
-    with backoff for up to 30 s.
+- **Risks:** saving restarts the plugin; actions fail with 503 until it is up.
 - **Output contract:** summary, files changed, tests run, blockers, risks, and task/plan status update.
 
 ## Results
-Partial, from the scaffold commit (2026-11-21):
 
-- **Done:** the `plugin-settings` card lists workspace IDs (Copy line), the
-  per-binding invite links, and "Test connection" through the
-  `connection.test` admin action. Settings are edited in Kandev's own schema
-  form below the card, not in a custom form.
-- **Done:** the backend `server/health.Test` checks token, application match,
-  Message Content intent (application flags), membership, and permissions
-  (`GET /users/@me/guilds`).
-- **Remaining:** gateway state in the report (needs task-06), cached
-  `connection.status`, and a live-host visual check. The card was not
-  rendered in a running Kandev ≥0.99. Only node contract tests ran.
+Partial from the scaffold (`105108d`): card with workspace IDs, invite links,
+and `connection.test`; backend checks for token, application, intent,
+membership, and permissions. Remaining: gateway state, `connection.status`,
+and a live-host visual check.

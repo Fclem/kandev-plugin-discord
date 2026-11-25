@@ -1,259 +1,276 @@
 ---
-spec: spec.md
+requirements:
+  - REQ-INTEGRATIONS-DISCORD-001
+  - REQ-INTEGRATIONS-DISCORD-002
+  - REQ-INTEGRATIONS-DISCORD-003
+  - REQ-INTEGRATIONS-DISCORD-004
+  - REQ-INTEGRATIONS-DISCORD-005
+  - REQ-INTEGRATIONS-DISCORD-006
+  - REQ-INTEGRATIONS-DISCORD-007
+  - REQ-INTEGRATIONS-DISCORD-008
+  - REQ-INTEGRATIONS-DISCORD-009
+  - REQ-INTEGRATIONS-DISCORD-010
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-001
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-002
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-003
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-004
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-005
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-006
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-007
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-008
+system_design:
+  - host-controls-system-design.md
+  - system-design.md
 created: 2026-11-21
-status: draft
+updated: 2026-11-25
+status: in_progress
 ---
 
 # Implementation Plan: Discord Task Channels
+
+This is the plugin repository's copy of
+[`kdlbs/kandev` `docs/plans/discord-plugin/plan.md`](https://github.com/kdlbs/kandev/blob/9ee282c20a36b71d1d8ebae797865741bdc94a38/docs/plans/discord-plugin/plan.md),
+re-planned on 2026-11-25 against the **merged** Host contract
+([kdlbs/kandev#5438](https://github.com/kdlbs/kandev/pull/5438), merge commit
+`83cecc587a8850f8da99dd3a77cf71d49297ab4c`, 2026-11-23). Upstream stays
+canonical for the requirements and the Host tasks; this copy owns the plugin
+tasks 05–14.
+
+| Document | Content |
+|---|---|
+| [`requirements.md`](requirements.md) | REQ-INTEGRATIONS-DISCORD-001…010 (behavior contract) |
+| [`system-design.md`](system-design.md) | Plugin design, data model, failure modes, scenarios |
+| [`host-controls-requirements.md`](host-controls-requirements.md) | REQ-PLUGINS-CHAT-BRIDGE-HOST-001…008 (Host contract) |
+| [`host-controls-system-design.md`](host-controls-system-design.md) | Host design of linking, receipts, `CancelTurn`, step approval |
+| [`adr-2026-11-22-plugin-external-chat-task-control.md`](adr-2026-11-22-plugin-external-chat-task-control.md) | Decision record (#5420) |
 
 ## Overview
 
 There are two deliverables.
 
-- **(A) Host API changes in `kdlbs/kandev`.** These are additive and need
-  maintainer approval (spec "Host API additions requested"):
-  - `CancelTurn`;
-  - delegated human-response authority for external chat surfaces;
-  - workflow step approval (`ApproveStep`/`GetStepApproval`);
+- **(A) Host API changes in `kdlbs/kandev` — done.** Decided on
+  [#5420](https://github.com/kdlbs/kandev/issues/5420#issuecomment-7083766483)
+  and merged in #5438:
+  - `CancelTurn` (exact execution command, fenced like `StopTaskRun`);
+  - account linking (`LinkExternalIdentity`) and linked-user receipts
+    (`RequestHumanResponseReceipt`) behind `host.v2.write:human_responses`;
+  - `GetStepApproval`/`ApproveStep`;
   - `Message.Source`;
-  - the `raw_content` plugin-event leak fix;
-  - docs.
+  - docs, including the `raw_content` correction (the payload field stays).
 - **(B) The plugin
   [`Fclem/kandev-plugin-discord`](https://github.com/Fclem/kandev-plugin-discord).**
-  It is scaffolded from `kdlbs/kandev-plugin-template` on the standalone
-  `github.com/kdlbs/kandev/pluginsdk` module.
+  Tasks 05–14 below.
 
-Most of (B) runs on Host surfaces that already exist on `origin/main`:
-provisioning, the channel lifecycle, two-way chat, `/status`, and
-`/stop scope:task`. Only `/stop` (turn scope), `/approve`/`/deny`, and echo
-suppression wait on (A).
+### What changed in this re-plan
 
-### Baseline correction
+The plugin tasks were written before #5420 was decided. They now follow the
+merged contract:
 
-The first draft of this plan (earlier on 2026-11-21) was investigated against
-a stale task checkout: `a1135aa8`, 2026-08-01, which is 2,503 commits behind.
-All host facts below were re-verified against `origin/main` `018808f8`
-(2026-11-21). Several gaps from the first draft are already shipped upstream:
+- **Linking, not attestation.** A Kandev user generates a link code on the
+  plugin settings page (host-rendered "Linked chat accounts" card) and runs
+  `/link <code>`; the plugin relays it with `LinkExternalIdentity`. Every
+  approval first requests a receipt for the clicking Discord user
+  (`Provider: "discord"`, `Subject: <user id>`). An unlinked user gets a deep
+  link and `/link` instructions instead of an effect.
+- **Exact signatures** from `docs/public/plugins-authoring.md` at `83cecc58`
+  (see "Host contract used").
+- **Echo suppression** uses `Message.Source`; the plugin never subscribes to
+  `message.*`.
+- **SDK gate** below.
 
-- task DTO archive and step fields;
-- `Tasks().Move`;
-- `Interactions()`;
-- exact `StopTaskRun` and `Archive`;
-- admin-only plugin management;
-- authenticated and admin plugin `actions`;
-- the `api_write` docs.
+## SDK gate
 
-They were removed from (A).
+| Item | State on 2026-11-25 |
+|---|---|
+| `pluginsdk` with #5438 | Unreleased; latest tag `pluginsdk/v0.4.0` predates the merge. The SDK record at the merge says `sdk_version: 0.5.0`, `host_release: null`. |
+| `@kdlbs/plugin-sdk` | Latest published `0.4.0`; `0.5.0` unpublished. The plugin UI uses no 0.5.0 frontend API, so `package.json` stays on `0.1.0` until both SDKs ship 0.5.0. |
+| Kandev release with #5438 | None; latest `v0.103.1` predates the merge. |
 
-## Investigation findings (`origin/main` 018808f8)
+Development pins the Go pseudo-version
+`github.com/kdlbs/kandev/pluginsdk v0.4.1-0.20261123163015-83cecc587a88`
+(no `replace` directive). `make sdk-check` therefore fails with
+"SDK record version 0.5.0 differs from selected version 0.4.1-…" and blocks
+CI and the release workflow on purpose. Local builds and packaging use
+`SDK_GATE=` (see the `Makefile`).
 
-### Plugin architecture and extension points
+**Release unblock checklist** (not part of this task set):
 
-| Surface | Current behavior (evidence) | Use in this plugin |
-|---|---|---|
-| SDK and manifest | Standalone module `github.com/kdlbs/kandev/pluginsdk` v0.1.0. Manifest `api_version` 1 or 2; v2 recommended. The template floor is `min_kandev_version: 0.99.0` (`kandev-plugin-template` `AGENTS.md`, `manifest.yaml`). | Scaffold on SDK v0.1.0 and API v2. Raise `min_kandev_version` to the first release that ships (A). |
-| Process model | Kandev spawns and supervises the plugin binary. It pings the plugin, restarts it with backoff, and offers no shutdown hook (`apps/backend/internal/plugins/runtime`). | The gateway client lives in the plugin process and starts once Host is injected. Each restart re-identifies. |
-| Events | Bounded per-plugin queue with retries; subjects match by segment wildcards (`apps/backend/internal/plugins/delivery/deliverer.go`). | Subscribe to low-volume lifecycle subjects only. Never subscribe to `message.*`, because streaming emits one event per chunk. Events are triggers; content comes from reads. |
-| Task reads | `Tasks().List/Get`, plus `Task.ArchivedAt`, `Task.WorkflowStepID`, and `TaskFilter.IncludeArchived` (`pluginsdk/data_types.go:111-132`). | Archive detection and `/status` need no host change. |
-| Task writes | `Tasks().Create/Update/Move`. Move uses the board path, which fires `task.moved` and `on_enter` (`docs/public/plugins-authoring.md` "Live Host writes"). Exact `Archive` and `Move` require Host v2 grants. | Not needed; the plugin does not mutate tasks. |
-| Message writes | `Messages().Send` (`api_write: messages`) queues behind a running session, otherwise resumes or starts it. It returns `queued`, `sent`, or `started` and stamps `metadata.source=plugin:<id>`. | Inbound Discord → Kandev uses it as-is, which satisfies the queue and running-turn rules. |
-| Message reads | `Messages().List` is sanitized. The `Message` DTO has no source or metadata (`pluginsdk/data_types.go:1014-1023`). | Echo suppression needs `Message.Source` (host task-17). |
-| Interactions | `Interactions().ListPending/Get` (`api_read: interactions`). Exact `RespondPermission`/`AnswerClarification` need `api_write: interactions`, `host.v2.write:interactions`, and a Host-issued **human response receipt**. Only the authenticated native UI mints receipts (`POST /api/plugins/host/interactions/response-receipts`, user with `session.control`). The v1 response methods return `PermissionDenied`. | Pending prompts come from `Interactions()`. Answering from Discord is blocked by design and needs the delegated authority in host task-15. |
-| Execution | `HostExecutionCommands(host)`: `EnsureTaskRun`, `StopTaskRun` (stops an execution by ID; `adapters_plugin_execution.go:84-111` → `orchestrator.StopExecution`), `RecoverSession`, and others, under `api_write: execution` + `host.v2.write:execution`. There is no turn cancel. | `/stop scope:task` uses `StopTaskRun`. `/stop` (turn) needs `CancelTurn` (host task-02). |
-| Workflow review approval | The UI Approve button calls `POST /api/v1/sessions/:id/approve` → `task/service.ApproveSession` (`apps/backend/internal/task/service/service_workflow.go:57+`). That resolves the step's configured transition, calls `MoveTask`, and sets `review_status=approved`. There is no plugin equivalent. | Host task-16 adds `ApproveStep`/`GetStepApproval`, gated by task-15's authority. |
-| Workspace grants | Host v2 capabilities need a workspace manager's grant in Settings > Plugins > Workspace access, with an approval revision and an audit record (`docs/public/plugins-authoring.md` "Security and capabilities"). | The delegated authority is a new grant in the same ledger. |
-| UI ↔ backend | Manifest `actions` (`access: authenticated \| admin`, scopes `workspace \| task \| repository \| notification_provider`) are invoked by `host.api.invokeAction`. The host authenticates and authorizes them before the plugin runs. Plugin config mutations are `RequireAdmin` (`apps/backend/internal/plugins/handlers.go:104-127`). | The quick-setup card saves through the admin config API and calls the admin actions `connection.test`/`connection.status`. No public webhook. |
-| Event sanitization | `publishMessageEvent` still adds `raw_content` when hidden system content exists (`apps/backend/internal/task/service/service_events.go:1417-1419`). Plugin delivery forwards payloads unfiltered (`delivery/payload.go`). | Host task-03 fixes it for all plugins. |
+1. `pluginsdk/v0.5.0` tagged and `@kdlbs/plugin-sdk@0.5.0` published.
+2. `go get github.com/kdlbs/kandev/pluginsdk@v0.5.0`, `npm i -D -E @kdlbs/plugin-sdk@0.5.0`,
+   bump the `kandev-sdk-check` tool version in the `Makefile`.
+3. Set `min_kandev_version` to the first Kandev release that contains
+   `83cecc58` (the SDK record's `min_kandev_version` is the floor).
+4. Point `.kandev-tooling-ref` at that release's commit.
+5. `make sdk-check check-format vet test verify-package`.
 
-### Discord API constraints (verified against `discord/discord-api-docs`, 2026-11)
+## Host contract used (verified at `83cecc58`)
 
-| Constraint | Value | Consequence |
-|---|---|---|
-| Guild creation by apps | `POST /guilds` restricted 2025-07-15 and removed; bots can no longer own guilds | Attach only. The operator creates the server and invites the bot. |
-| Channels | 500 per guild including categories (error `30013`); 50 per category | Category rollover, retention and deletion, and `capacity_blocked`. |
-| Messages | 2000 chars; embeds 10 per message, 6000 chars total | Fence-aware chunker with a 5-chunk cap. |
-| Mentions | Regular messages parse everything by default | Always send `allowed_mentions: {parse: []}`. |
-| Rate limits | Per-route buckets (`X-RateLimit-Bucket`); global 50 req/s; 10,000 invalid requests per 10 min ban. Renames are commonly 2 per 10 min per channel (undocumented, `[INFERENCE]`) | Header-driven limiter, per-channel senders, a 40 req/s budget, debounces, and a hard stop on 401. |
-| Intents | `MESSAGE_CONTENT` is privileged; portal toggle below 100 guilds; close code `4014` if disallowed | README walkthrough; `4004`/`4013`/`4014` are fatal. |
-| Gateway | Resume via `resume_gateway_url`; 1000 IDENTIFY per 24 h (exceeding resets the token) | `bwmarrin/discordgo` plus a persisted identify counter. |
-| Interactions | 3 s initial response; 15 min token; guild commands update instantly | Defer everything; guild-scoped commands; register only when the hash changes. |
-| Gateway vs webhooks | `MESSAGE_CREATE` is gateway-only | Gateway only. |
+| Need | Host surface | Manifest | Workspace grant |
+|---|---|---|---|
+| Task list/get with archive and step | `Tasks().List/Get` (`TaskFilter.IncludeArchived`, `Task.ArchivedAt`, `Task.WorkflowStepID`) | `api_read: tasks` | — |
+| Sessions | `Sessions().List` | `api_read: sessions` | — |
+| Outbound content | `Messages().List` (sanitized, `Message.Source`) | `api_read: messages` | — |
+| Inbound delivery | `Messages().Send(ctx, taskID, "", text)` → `queued`/`sent`/`started`; gRPC `ResourceExhausted` = queue full, `FailedPrecondition` = task or session inactive, `Aborted` = changed or claimed | `api_write: messages` | — |
+| Pending prompts | `pluginsdk.Interactions(host).ListPending/Get` (`Interaction.ResolvedBy`) | `api_read: interactions` | — |
+| Step names | `Workflows().ListSteps` | `api_read: workflows` | — |
+| Capability context | `pluginsdk.HostV2(host).GetCapabilityContext(ctx, workspaceID)` → `ApprovalRevision`, `ManifestDigest` | — | — |
+| Execution IDs and session versions | `pluginsdk.HostExactQueries(host).ListSessions` (`ExactSessionObservation.ExecutionID`, `.ResourceVersion`) | `api_read: sessions` | `host.v2.read:sessions` |
+| Interaction revision | `HostExactQueries(host).GetInteraction` (`ResourceVersion`) | `api_read: interactions` | `host.v2.read:interactions` |
+| `/stop scope:task` | `HostExecutionCommands(host).StopTaskRun(ctx, ExactTaskExecutionCommand)` | `api_write: execution` | `host.v2.write:execution` |
+| `/stop` (turn) | `HostExecutionCommands(host).CancelTurn(ctx, ExactTaskExecutionCommand)`; `NO_CHANGE` when no turn runs | `api_write: execution` | `host.v2.write:execution` |
+| Step approval read | `HostExecutionCommands(host).GetStepApproval(ctx, ExactStepApprovalQuery)`; Office stage → gRPC `Unimplemented` | `api_read: sessions` | `host.v2.read:sessions` |
+| Step approval | `HostExecutionCommands(host).ApproveStep(ctx, ExactStepApprovalCommand)`; `CONFLICT` `step_not_awaiting_approval` / `step_approval_changed`, `UNSUPPORTED` for Office | `api_write: execution` | `host.v2.write:execution` |
+| `/link` | `HostHumanResponseDelegation(host).LinkExternalIdentity(ctx, ExternalIdentityLinkRequest)`; `DENIED missing_capability_approval` keeps the code valid | `api_write: human_responses` | `host.v2.write:human_responses` in any workspace |
+| Receipts | `HostHumanResponseDelegation(host).RequestHumanResponseReceipt(ctx, HumanResponseReceiptRequest)`; `DENIED external_identity_not_linked` / `linked_user_not_authorized`; 5 min, single use, in memory | `api_write: human_responses` | `host.v2.write:human_responses` |
+| Permission answer | `HostExactInteractionCommands(host).RespondPermission(ctx, ExactPermissionResponse)` | `api_write: interactions` | `host.v2.write:interactions` |
+| Settings card | Manifest `actions` `connection.test`, `connection.status` (`access: admin`, `scope: workspace`) | `min_kandev_version ≥ 0.91.1` | — |
+
+Management claim fence: the plugin sends an empty `ManagementInstanceKey` and
+`ExpectedClaimGeneration: 0` (never-claimed task). The SDK has no claim read,
+so a task claimed by another owner, or released after a claim, returns
+`CONFLICT`; `/stop` reports it as "the task is managed elsewhere". Recorded as
+a Host gap (see Risks).
 
 ## Architecture (plugin)
 
 ```
-kandev events ──OnEvent──▶ dispatcher ──▶ per-task worker ──▶ outbound (Messages.List → chunk → per-channel sender)
-                                              │                └▶ channel lifecycle (create/rename/close)
-Discord gateway ─MESSAGE_CREATE──▶ inbound (authz → dedupe → Messages.Send → reaction)
-               ─INTERACTION_CREATE─▶ commands (/status /stop /approve /deny, buttons, autocomplete)
-               ─CHANNEL_DELETE / GUILD_* / READY──▶ reconciler
-reconciler (READY + every 5 min): bindings → provisioning → task/channel diff → cursors → Interactions.ListPending → retention
-admin actions: connection.test / connection.status ◀── settings card (host.api.invokeAction)
-store: Host state
+kandev events ──OnEvent──▶ bridge.HandleEvent ──▶ per-task scheduler (coalesced sync)
+                                                     ├▶ channels   (create / rename / close / reopen / retention)
+                                                     ├▶ outbound   (Messages.List after cursor → chunk → send; status lines; card)
+                                                     └▶ prompts    (Interactions.ListPending, GetStepApproval → buttons)
+Discord gateway ─MESSAGE_CREATE───▶ inbound  (authz → dedupe → Messages.Send → reaction)   [per-task queue]
+               ─INTERACTION_CREATE▶ commands (/link /status /stop /approve /deny, buttons, autocomplete)
+               ─READY/GUILD_CREATE▶ provision → reconcile → inbound catch-up
+               ─CHANNEL_DELETE────▶ record → deleted
+reconciler (READY + every 5 min): bindings → tasks (IncludeArchived) → kick every task sync → orphan records
+admin actions: connection.test (live) / connection.status (cached) ◀── settings card
+store: Host state (plugin-namespaced JSON)
 ```
-
-Packages under `server/`:
 
 | Package | Responsibility |
 |---|---|
-| `config` | Parsing and validation |
-| `discordapi` | Interface, discordgo implementation, and fake |
-| `gateway` | Gateway connection |
-| `store` | Host state access |
-| `provision` | Guild provisioning |
-| `channels` | Channel lifecycle |
-| `outbound` | Kandev → Discord mirroring |
-| `inbound` | Discord → Kandev delivery |
-| `commands` | Slash commands, buttons, autocomplete |
-| `reconcile` | Periodic and `READY` reconciliation |
-| `authz` | Operator checks |
-| `health` | Health cache and admin actions |
+| `server/config` | Parse and validate every `config_schema` field |
+| `server/discordapi` | `API` interface, discordgo REST implementation (401 halt, 40 req/s budget, context), call-recording `Fake` |
+| `server/gateway` | Supervisor around the discordgo websocket: intents, fatal close codes, identify budget, jittered reconnect |
+| `server/store` | Typed Host-state records and the channel reverse index; in-memory fake `StateHost` |
+| `server/kandev` | Narrow facade over `pluginsdk.Host` and its v2 extensions; fake for tests |
+| `server/provision` | Idempotent guild provisioning and command registration |
+| `server/channels` | Naming, topic, category rollover, lifecycle state machine |
+| `server/outbound` | Cursor puller, filter, fence-aware chunker, status lines, task card |
+| `server/prompts` | Permission and step-approval prompt posting and clearing |
+| `server/inbound` | Message delivery, reactions, catch-up |
+| `server/authz` | Operator check |
+| `server/commands` | Command definitions, `/link`, `/status`, `/stop`, `/approve`, `/deny`, buttons, autocomplete |
+| `server/bridge` | Wiring: scheduler, event dispatch, gateway handlers, reconcile loop, health record |
+| `server/health` | `connection.test` checks and the cached `connection.status` |
 
-## Backend — Kandev host (`kdlbs/kandev`, needs maintainer approval)
+Cross-cutting rules:
 
-| Task | Change | Key files |
-|---|---|---|
-| [01](task-01-host-control-rpcs-adr.md) | An ADR for all host additions | `docs/decisions/` |
-| [02](task-02-host-control-rpcs.md) | `CancelTurn` exact execution command → `orchestrator.Service.CancelAgent` | `pluginsdk/exact_execution*.go`, `pluginsdk/proto/kandev/plugin/v1/plugin.proto`, `apps/backend/internal/plugins/host_exact_execution.go`, `apps/backend/internal/backendapp/adapters_plugin_execution.go` |
-| [03](task-03-host-plugin-event-sanitization.md) | Drop `raw_content` from plugin deliveries of `message.*` | `apps/backend/internal/plugins/delivery/` |
-| [15](task-15-host-delegated-human-responses.md) | Delegated human-response receipts with an external actor attestation, as a workspace grant | Interaction receipt service, Host v2 grant ledger, `pluginsdk` |
-| [16](task-16-host-step-approval-rpcs.md) | `ApproveStep` (reusing `ApproveSession`) and `GetStepApproval` | `apps/backend/internal/task/service/service_workflow.go`, plugin host, `pluginsdk` |
-| [17](task-17-host-message-source.md) | `Message.Source` on the read DTO | `pluginsdk/data_types.go`, `apps/backend/internal/plugins/host_data.go` |
-| [04](task-04-host-plugin-docs.md) | Public docs for the above | `docs/public/plugins-authoring.md`, `docs/public/plugins-manifest.md` |
-
-## Backend — plugin (`Fclem/kandev-plugin-discord`)
-
-Plugin tasks 05–14 are listed under the waves below. Cross-cutting rules:
-
-- **Idempotency.**
-  - An in-memory LRU of event IDs.
-  - Every Discord mutation checks the store first.
-  - Outbound posting is cursor-driven.
-  - Pending prompts are reconciled against `Interactions()`.
-- **Concurrency.** One worker per task key serializes writes to Host state,
-  which has no compare-and-swap.
-- **Logging.** Never log config, the token, or message content at info level.
+- **Idempotency.** Event IDs go through an in-memory LRU. Every Discord
+  mutation checks the stored record first. Outbound posting is cursor-driven.
+  Prompts are reconciled against `Interactions()` and `GetStepApproval`.
+- **Concurrency.** One goroutine per task key runs that task's work in order
+  (sync, inbound messages, button presses), because Host state has no
+  compare-and-swap. Guild provisioning is serialized per guild.
+- **Contexts.** Event and action handlers pass the Host's handler context to
+  Host calls. Gateway-driven work has none and uses a background context.
+- **Logging.** Never log config, the token, or message content; log IDs and
+  outcomes only.
 
 ## Frontend
 
-The Kandev SPA does not change. The plugin ships `ui/bundle.js` with one
-`plugin-settings` component above Kandev's schema-driven settings form. The
-admin-only form already provides the token (masked), the application ID, and
-the `workspace_guilds` fields, and saving it restarts the plugin.
-
-The card adds:
-
-- workspace IDs with a "Copy line" button;
-- per-binding invite links;
-- **Test connection**: `host.api.invokeAction("connection.test", { workspaceId })`
-  per binding, rendering one pass/fail/skip line per check.
-- `initialize`/`destroy` must be repeatable.
+No Kandev SPA change. `ui/bundle.js` registers one `plugin-settings` card above
+Kandev's schema form and the host-rendered "Linked chat accounts" card. It
+shows workspace IDs, per-binding invite links, **Test connection**
+(`connection.test`), and the cached gateway state (`connection.status`).
 
 ## Tests
 
 | What (spec scenario) | File | How |
 |---|---|---|
-| `CancelTurn` fencing, grant gating, delegation to `CancelAgent` | `apps/backend/internal/plugins/host_exact_execution_test.go`, `apps/backend/internal/backendapp/adapters_plugin_execution_test.go` | Table-driven, fake orchestrator |
-| Delegated receipts: grant required, attestation recorded, single use, revision-bound | Receipt service tests, `apps/backend/internal/plugins/*_test.go` | Real ledger plus fake interactions |
-| `ApproveStep`/`GetStepApproval`: awaiting rules, `FailedPrecondition`, office `Unimplemented` | `apps/backend/internal/task/service/service_workflow_test.go`, plugin host tests | Real workflow fixtures |
-| `Message.Source` projected from `metadata.source` only | `apps/backend/internal/plugins/host_data_test.go`, `pluginsdk/host_data_test.go` | Fake message source; wire round-trip |
-| `raw_content` stripped for plugins, kept for WebSocket | `apps/backend/internal/plugins/delivery/deliverer_test.go` | Publish an event with hidden content |
-| Binding parse | `server/config/config_test.go` | Table-driven |
-| Naming, rename debounce, rollover, capacity | `server/channels/*_test.go` | Fake `discordapi`, fake clock |
+| Config parse, defaults, validation | `server/config/config_test.go` | Table-driven |
+| Fake records calls; 401 halts; error mapping | `server/discordapi/*_test.go` | `httptest` Discord |
+| Fatal close codes, identify budget, reconnect | `server/gateway/gateway_test.go` | Fake connector, fake clock |
 | Provisioning idempotency | `server/provision/provision_test.go` | Fake `discordapi` |
-| Reconcile: downtime, archive, pending interactions | `server/reconcile/reconcile_test.go` | Fake Host plus fake Discord |
-| Outbound order, cursor, echo suppression, chunking, mentions | `server/outbound/*_test.go` | Fake Host messages |
-| Inbound authz, reactions per `Send` outcome, catch-up age | `server/inbound/*_test.go` | Fake `Send` |
-| `/status`, `/stop` scopes, `/approve` (permissions, steps, missing grant, stale) | `server/commands/*_test.go` | Fake interactions |
-| Admin actions: token, intent, membership, permissions; no secrets in output | `server/health/health_test.go`, `ui/*.test.*` | Fake Discord; template UI harness |
-| Fatal close codes; 401 halt | `server/gateway/gateway_test.go` | Fake session |
+| Naming, rename debounce, rollover, capacity, close/reopen/retention | `server/channels/*_test.go` | Fake `discordapi`, fixed clock |
+| Reconcile: downtime, archive, orphan, no-op second run | `server/bridge/*_test.go` | Fake Host plus fake Discord |
+| Outbound order, cursor, echo suppression, chunking, mentions, card | `server/outbound/*_test.go` | Fake Host messages |
+| Inbound authz, reactions per outcome, dedupe, catch-up age | `server/inbound/*_test.go` | Fake `Send` |
+| `/status`, `/stop` scopes and outcomes | `server/commands/*_test.go` | Fake exact commands |
+| `/link`, approvals: linked, unlinked, missing grant, stale, Office | `server/commands/*_test.go`, `server/prompts/*_test.go` | Fake delegation and interactions |
+| Admin actions; no secrets in output | `server/health/health_test.go`, `server/plugin_test.go`, `tests/settings-card.test.js` | Fake Discord; node contract tests |
 
-## E2E Tests
+## E2E
 
-There are no Kandev SPA changes, so there are no Playwright specs in
-`kdlbs/kandev`.
+There are no Kandev SPA changes and no Playwright specs. Plugin acceptance is
+the artifact smoke in task-14 on a disposable dev Kandev built from `main`
+(≥ `83cecc58`, `KANDEV_MOCK_AGENT=true`) with a dedicated test bot and guild.
 
-- Host changes are covered by Go tests, plus one in-tree fixture plugin
-  exercise for `CancelTurn`, `ApproveStep`, and delegated receipts. It follows
-  the existing plugin fixture pattern in `apps/backend/internal/plugins/runtime/testdata`.
-- Plugin acceptance is an artifact smoke in task-14, run on a disposable dev
-  Kandev with a dedicated test bot and guild.
+## Implementation waves
 
-## Verification Results
-
-Pending.
-
-## Phased delivery and estimates (engineer-days)
-
-| Phase | Tasks | Estimate | Outcome |
-|---|---|---|---|
-| 0. Host additions (after maintainer approval) | 01, 02, 03, 15, 16, 17, 04 | 6–8.5 d | `CancelTurn`, delegated responses, step approval, `Message.Source`, leak fix, docs |
-| 1. Plugin foundation | 05–07 | 5–6 d | Scaffold (done), config, gateway, provisioning, channel lifecycle |
-| 2. Sync and chat | 08–10 | 5–6 d | Reconcile, mirroring, inbound delivery |
-| 3. Commands | 11–12 | 3.5–5 d | `/status`, `/stop`, `/approve`/`/deny` for permissions and steps |
-| 4. Ship | 13–14 | 3–4 d | Quick-setup card with connection test, artifact smoke, release |
-| **Total** | 17 tasks | **22.5–29.5 d** | Phases 0 and 1–2 run in parallel; phase 3 waits on 0 |
-
-## Implementation Waves And Parallel Candidates
-
-Default execution is sequential. Using subagents requires explicit user
-authorization.
+Default execution is sequential.
 
 ```
-Wave 1 (parallel candidates — different repositories):
-- [ ] [task-01-host-control-rpcs-adr](task-01-host-control-rpcs-adr.md)
+Wave 1:
+- [x] [task-01-host-control-rpcs-adr](task-01-host-control-rpcs-adr.md)  (#5438)
 - [ ] [task-05-plugin-bootstrap-config](task-05-plugin-bootstrap-config.md)
 
 Wave 2:
-- [ ] [task-02-host-control-rpcs](task-02-host-control-rpcs.md)  (CancelTurn)
-- [ ] [task-03-host-plugin-event-sanitization](task-03-host-plugin-event-sanitization.md)  (parallel-safe with 02: delivery/ only)
-- [ ] [task-17-host-message-source](task-17-host-message-source.md)  (sequential with 02: shared proto)
+- [x] [task-02-host-control-rpcs](task-02-host-control-rpcs.md)  (CancelTurn, #5438)
+- [x] ~~[task-03-host-plugin-event-sanitization](task-03-host-plugin-event-sanitization.md)~~  (cancelled; docs corrected in #5438)
+- [x] [task-17-host-message-source](task-17-host-message-source.md)  (#5438)
 - [ ] [task-06-plugin-gateway-provisioning](task-06-plugin-gateway-provisioning.md)
 
 Wave 3:
-- [ ] [task-15-host-delegated-human-responses](task-15-host-delegated-human-responses.md)
+- [x] [task-15-host-delegated-human-responses](task-15-host-delegated-human-responses.md)  (#5438)
 - [ ] [task-07-plugin-channel-lifecycle](task-07-plugin-channel-lifecycle.md)
 
 Wave 4:
-- [ ] [task-16-host-step-approval-rpcs](task-16-host-step-approval-rpcs.md)
+- [x] [task-16-host-step-approval-rpcs](task-16-host-step-approval-rpcs.md)  (#5438)
 - [ ] [task-08-plugin-reconciler](task-08-plugin-reconciler.md)
 - [ ] [task-09-plugin-outbound-mirroring](task-09-plugin-outbound-mirroring.md)
 
 Wave 5:
-- [ ] [task-04-host-plugin-docs](task-04-host-plugin-docs.md)
+- [x] [task-04-host-plugin-docs](task-04-host-plugin-docs.md)  (#5438)
 - [ ] [task-10-plugin-inbound-delivery](task-10-plugin-inbound-delivery.md)
 - [ ] [task-11-plugin-status-stop-commands](task-11-plugin-status-stop-commands.md)
 
 Wave 6:
-- [ ] [task-12-plugin-permission-approvals](task-12-plugin-permission-approvals.md)  (permissions + steps; needs 15, 16)
-- [ ] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)  (quick setup + connection test)
+- [ ] [task-12-plugin-permission-approvals](task-12-plugin-permission-approvals.md)  (/link, permissions, steps)
+- [ ] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)
 
 Wave 7:
 - [ ] [task-14-plugin-artifact-smoke-release](task-14-plugin-artifact-smoke-release.md)
 ```
 
+## Verification Results
+
+Pending; filled per task in each task's `## Results`.
+
 ## Risks
 
-- **Maintainer decision on task-15.** Delegated receipts change the "humans
-  answer through the native UI" boundary. If the maintainers prefer account
-  linking, task-15 grows by about 3–4 days. If they refuse both,
-  `/approve`/`/deny` ship as deep links to Kandev instead.
+- **SDK and release gate.** See "SDK gate". Until 0.5.0 and a Kandev release
+  ship, CI's `make sdk-check` step fails by design.
+- **Background calls and workspace collaboration.** Gateway-driven Host calls
+  (inbound chat, commands, reconcile) have no Kandev handler context. On an
+  instance with `workspace_collaboration` enabled, conversation-domain calls
+  then return `PermissionDenied` ("Conversation caller context" in the
+  authoring guide). The plugin reports the error; it cannot work around it.
+  Host gap.
+- **Management claims.** No plugin read exposes the task's claim generation,
+  so `/stop` assumes an unclaimed task. Host gap.
 - **Discord policy.** Further restrictions on bots or privileged intents would
   break inbound chat. Discord sits behind `discordapi`.
-- **Channel cap.** Retention, deletion, and rollover mitigate it; forum
-  threads were rejected.
-- **Authority.** Guild role admins effectively control tasks. Approvals also
-  need the Kandev workspace grant, and every approval is audited with the
-  Discord actor.
-- **Event loss.** Cursor pulls and a 5-minute reconcile mitigate it; the worst
-  case is a 5-minute delay.
-- **Identify budget.** Config edits and crash loops each re-identify. A
-  persisted counter enforces a 900-per-24 h cap.
-- **SDK versioning.** (A) needs a pluginsdk release after v0.1.0. The plugin
-  pins it and raises `min_kandev_version` together.
+- **Channel cap.** Retention, deletion, and rollover mitigate it.
+- **Authority.** Guild role admins control chat and `/stop`. Approvals act
+  only for a linked Kandev user with `session.control`, need the workspace
+  grant, and are audited.
+- **Event loss.** Cursor pulls and the 5-minute reconcile bound the delay.
+- **Identify budget.** A persisted counter refuses to connect after 900
+  identifies in 24 h.
+- **Streaming rows.** An agent message row can grow while its turn runs, so a
+  mid-turn pull holds back the newest agent message of a running session.
 
 ## Open Questions
 
-See the spec "Decisions" and "Open questions". The remaining ones are for the
-Kandev maintainers: the shape of the delegated authority (task-15) and
-whether `CancelTurn` is acceptable (task-02).
+None.

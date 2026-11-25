@@ -1,66 +1,70 @@
 ---
 id: "12-plugin-permission-approvals"
-title: "Approvals: permission requests and workflow review steps"
+title: "/link and approvals through linked-user receipts"
 status: pending
 wave: 6
 depends_on: ["11-plugin-status-stop-commands", "09-plugin-outbound-mirroring", "15-host-delegated-human-responses", "16-host-step-approval-rpcs"]
 plan: "plan.md"
-spec: "spec.md"
+requirements:
+  - REQ-INTEGRATIONS-DISCORD-008
+acceptance_criteria:
+  - AC-INTEGRATIONS-DISCORD-008.1
+  - AC-INTEGRATIONS-DISCORD-008.2
+  - AC-INTEGRATIONS-DISCORD-008.3
+  - AC-INTEGRATIONS-DISCORD-008.4
+  - AC-INTEGRATIONS-DISCORD-008.5
+system_design:
+  - system-design.md
 ---
 
-# Task 12: Approvals (permission requests and workflow review steps)
+# Task 12: `/link` and approvals (permission requests and workflow steps)
 
 Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 - **Acceptance:**
-  1. **Permission requests.**
-     - **Posting.** `permission_request.received.*` plus reconciliation with
-       `Interactions().ListPending` post one prompt per pending permission
-       interaction:
-       - the title, and one button per option (at most 5 per row and 25 in
-         total; any overflow links to Kandev);
-       - the prompt is recorded in `task/<id>/interaction_prompts`;
-       - duplicates post nothing.
-     - **Resolving.** A button, `/approve`, or `/deny` from an operator first
-       obtains a delegated human-response receipt (host task-15). The receipt
-       carries the observed interaction revision, the exact option, and the
-       attestation `{provider: "discord", subject: <user id>, display_name}`.
-       The plugin then calls exact `RespondPermission`.
-       - `/approve` picks `allow_once`, falling back to the first `allow_*`
-         option.
-       - `/deny` picks `reject_once`, falling back to the first `reject_*`
-         option.
-     - **Outcomes.**
-       - Success: the prompt is edited to show the actor.
-       - `CONFLICT`, a stale revision, or a resolved `Get`: "resolved
-         elsewhere".
-  2. **Workflow review steps.**
-     - **Posting.** On `turn.completed` or `task_session.state_changed`, the
-       plugin calls `GetStepApproval` (host task-16). When `awaiting`, it posts
-       "Step *<from>* awaits approval → *<to>*" with Approve, at most once. It
-       clears the prompt on `task.moved`.
-     - **Approving.** Approve or `/approve` (with no pending permission) gets
-       a `step_approval` receipt, then calls `ApproveStep`.
-     - **Outcomes.**
-       - `FailedPrecondition`: "nothing awaiting approval".
-       - `Unimplemented` (office stage): "approve this stage in Kandev".
-  3. **Missing grant.** Without the delegated grant, every approval replies
-     ephemerally that "a Kandev workspace manager must grant Discord
-     approvals", and nothing changes. With no argument, permission requests
-     take precedence over the step. Autocomplete lists both kinds, and `/deny`
-     never applies to steps.
-- **Verification:** `make test-backend`
-- **Files likely touched:** `server/commands/{approve.go,buttons.go,autocomplete.go,*_test.go}`, `server/outbound/{interaction_prompt.go,step_approval.go}`, `server/kandev/receipts.go`, `server/store/store.go`, `manifest.yaml` (`api_read: interactions`, `api_write: interactions`, the delegated grant).
-- **Dependencies:** tasks 11, 09, 15, 16.
-- **Parallelism:** sequential.
-- **Inputs:**
-  - Spec "Slash commands", "Decisions" item 2, and the approval scenarios.
-  - `docs/public/plugins-authoring.md` "Pending agent interactions" and
-    "Exact execution controls and human interaction responses".
-- **Risks:** If the maintainers pick identity linking for task-15, the receipt
-  step becomes "resolve the linked Kandev user". Re-plan this task once the
-  ADR lands.
+  1. **`/link <code>`** (anyone in a bound guild, any channel):
+     `LinkExternalIdentity{Provider: "discord", Subject: <user id>, DisplayName}`.
+     Ephemeral replies never echo the code: `APPLIED` → "Linked to
+     <Kandev user>"; `DENIED missing_capability_approval` → "a workspace
+     manager must grant Discord approvals; your code stays valid"; other
+     denials → "invalid or expired code".
+  2. **Permission prompts** (sync, `permission_request.received.*`,
+     reconcile): one message per pending permission interaction with one
+     button per option (≤ 5 per row, ≤ 25; overflow → deep link), recorded
+     in `task/<id>/interaction_prompts`; no duplicates. A pending
+     clarification gets one notice with a deep link (not answerable from
+     Discord). A prompt whose interaction resolved is edited to show
+     `ResolvedBy` ("✅ Alice via discord") or "resolved elsewhere" and its
+     buttons are removed.
+  3. **Step prompts:** for each non-running session, `GetStepApproval`;
+     `Awaiting` → one "Step *from* awaits approval → *to*" message with
+     Approve, recorded in `task/<id>/step_approval`; cleared on `task.moved`
+     or when no longer awaiting. Office stages (`Unimplemented`) post nothing.
+  4. **Answering.** Buttons, `/approve [request]`, `/deny [request]`
+     (operators only): read the exact revision (`GetInteraction` or
+     `GetStepApproval`), request a receipt
+     (`HumanResponseKindPermission` with the option, or
+     `HumanResponseKindStepApproval` with the session as target), then
+     `RespondPermission` or `ApproveStep`. `/approve` picks `allow_once`, then
+     the first `allow_*`; `/deny` picks `reject_once`, then the first
+     `reject_*`. With no argument, a single pending permission wins over the
+     step; several pending → "choose one" with autocomplete; `/deny` never
+     applies to steps. Autocomplete lists both kinds.
+  5. **Outcomes.** Success edits the prompt with the actor and removes the
+     buttons. `DENIED external_identity_not_linked` → deep link plus `/link`
+     instructions; `linked_user_not_authorized` → "your Kandev account lacks
+     session control"; other denials or `PermissionDenied` → "a Kandev
+     workspace manager must grant Discord approvals
+     (`host.v2.write:human_responses`)"; `CONFLICT`/`NOT_FOUND` or a resolved
+     interaction → "already resolved" and the prompt is marked;
+     `step_not_awaiting_approval` → "nothing awaiting approval";
+     `Unimplemented`/`UNSUPPORTED` → "approve this stage in Kandev". Nothing
+     changes in Kandev on any refusal.
+- **Verification:** `make check-format vet test` (from the plugin root, after `npm ci --ignore-scripts`; see the plan's "SDK gate" for why `make sdk-check` fails until SDK 0.5.0 ships); `go test ./server/commands/... ./server/prompts/...`.
+- **Files:** `server/commands/{link.go,approve.go,autocomplete.go,*_test.go}`, `server/prompts/*`, `server/kandev/*`, `server/store/store.go`, `manifest.yaml`.
+- **Dependencies:** tasks 09, 11; host tasks 15 and 16 (merged).
 - **Output contract:** summary, files changed, tests run, blockers, risks, and task/plan status update.
 
 ## Results
+
 Pending.
