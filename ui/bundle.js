@@ -12,7 +12,7 @@
 
 export const PLUGIN_ID = "kandev-plugin-discord";
 
-// Must match server/discord/permissions.go RequiredPermissions.
+// Must match server/discordapi/permissions.go RequiredPermissions.
 // BigInt: bit 51 (PIN_MESSAGES) exceeds 32-bit JS bitwise operators.
 const REQUIRED_PERMISSION_BITS = [4n, 6n, 10n, 11n, 14n, 16n, 28n, 51n];
 

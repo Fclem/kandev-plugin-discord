@@ -3,12 +3,12 @@ module kandev-plugin-discord
 go 1.26.0
 
 require (
+	github.com/bwmarrin/discordgo v0.29.0
 	github.com/kdlbs/kandev/pluginsdk v0.4.1-0.20261123163015-83cecc587a88
 	github.com/stretchr/testify v1.11.1
 )
 
 require (
-	github.com/bwmarrin/discordgo v0.29.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fatih/color v1.13.0 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect

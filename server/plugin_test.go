@@ -3,14 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/kdlbs/kandev/pluginsdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"kandev-plugin-discord/server/discord"
+	"kandev-plugin-discord/server/discordapi"
 	"kandev-plugin-discord/server/health"
 )
 
@@ -23,20 +23,16 @@ type configHost struct {
 
 func (h configHost) GetConfig(context.Context) (map[string]any, error) { return h.config, nil }
 
-type okAPI struct{}
-
-func (okAPI) CurrentUser(context.Context) (discord.User, error) {
-	return discord.User{Username: "bot"}, nil
-}
-func (okAPI) CurrentApplication(context.Context) (discord.Application, error) {
-	return discord.Application{ID: "123456789012345678", Flags: discord.FlagGatewayMessageContentLimited}, nil
-}
-func (okAPI) CurrentUserGuilds(context.Context) ([]discord.PartialGuild, error) {
-	return []discord.PartialGuild{{ID: "223456789012345678", Name: "Team", Permissions: strconv.FormatUint(discord.RequiredPermissionBits(), 10)}}, nil
+func healthyFake() *discordapi.Fake {
+	f := discordapi.NewFake()
+	f.Application = &discordgo.Application{ID: "123456789012345678", Flags: int(discordapi.FlagGatewayMessageContentLimited)}
+	f.AddGuild("223456789012345678", "Team", int64(discordapi.RequiredPermissionBits()))
+	return f
 }
 
 func newTestPlugin(cfg map[string]any) *discordPlugin {
-	p := &discordPlugin{newAPI: func(string) health.API { return okAPI{} }}
+	f := healthyFake()
+	p := &discordPlugin{newAPI: func(string) health.API { return f }}
 	if cfg != nil {
 		p.SetHost(configHost{config: cfg})
 	}

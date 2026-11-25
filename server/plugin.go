@@ -8,7 +8,7 @@ import (
 	"github.com/kdlbs/kandev/pluginsdk"
 
 	"kandev-plugin-discord/server/config"
-	"kandev-plugin-discord/server/discord"
+	"kandev-plugin-discord/server/discordapi"
 	"kandev-plugin-discord/server/health"
 )
 
@@ -32,7 +32,7 @@ var (
 )
 
 func newDiscordPlugin() *discordPlugin {
-	return &discordPlugin{newAPI: func(token string) health.API { return discord.NewClient(token) }}
+	return &discordPlugin{newAPI: func(token string) health.API { return discordapi.NewClient(discordapi.NewSession(token)) }}
 }
 
 // HandleAction serves host-authenticated browser actions.

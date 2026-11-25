@@ -1,7 +1,7 @@
 ---
 id: "05-plugin-bootstrap-config"
 title: "Plugin config parsing and Discord API seam"
-status: in_progress
+status: done
 wave: 1
 depends_on: []
 plan: "plan.md"
@@ -54,5 +54,21 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/create-kandev-plugin` and
 
 ## Results
 
-Pending (scaffold commit `105108d` delivered the manifest identity, the
-`connection.test` action, the config schema, and binding parsing).
+- **Done.** Manifest: full capabilities, both admin actions, release-blocker
+  note on `min_kandev_version`. `go.mod` pins the pluginsdk pseudo-version
+  and `bwmarrin/discordgo v0.29.0`; `Makefile` `SDK_GATE`;
+  `.kandev-tooling-ref` → `83cecc58`.
+- **Config.** `server/config.Parse` covers every schema field with
+  defaults and validation (`allowed_user_ids`, `kandev_base_url`, enums,
+  non-negative integers) and token-free errors; `TaskURL`, `BindingForGuild`.
+- **Discord seam.** `server/discordapi`: `API` interface, discordgo `Client`
+  (context per call, 401 → `ErrHalted` for bot calls only, 40 req/s
+  limiter, sanitized `*Error`, forced `allowed_mentions.parse=[]`), and the
+  call-recording `Fake`. `server/discord` was folded into it; `server/health`
+  uses discordgo types.
+- **Tests:** `make check-format vet test build SDK_GATE=` passed (config,
+  discordapi with an `httptest` Discord, health, plugin, 5 UI tests, package
+  and release verifier tests). `make sdk-check` fails as planned ("SDK
+  record version 0.5.0 differs from selected version 0.4.1-…").
+- **Note:** discordgo v0.29.0 speaks REST/gateway API v9, not v10; v9 is
+  still served by Discord and the Message Content intent applies to it.

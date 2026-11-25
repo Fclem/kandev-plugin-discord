@@ -213,7 +213,7 @@ Default execution is sequential.
 ```
 Wave 1:
 - [x] [task-01-host-control-rpcs-adr](task-01-host-control-rpcs-adr.md)  (#5438)
-- [ ] [task-05-plugin-bootstrap-config](task-05-plugin-bootstrap-config.md)
+- [x] [task-05-plugin-bootstrap-config](task-05-plugin-bootstrap-config.md)
 
 Wave 2:
 - [x] [task-02-host-control-rpcs](task-02-host-control-rpcs.md)  (CancelTurn, #5438)

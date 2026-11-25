@@ -2,22 +2,23 @@
 # and a kandev host. `id` MUST match go.mod's module line, the Makefile BIN
 # name, and the id passed to window.registerKandevPlugin(...) in ui/bundle.js.
 #
-# Design: docs/design/spec.md (proposed upstream as
-# kdlbs/kandev docs/specs/integrations/discord.md) and docs/design/plan.md.
-# Capabilities are declared only as features land; the full target set is in
-# the spec's "Plugin manifest" section.
+# Design: docs/design/requirements.md and docs/design/system-design.md
+# (mirrors of kdlbs/kandev docs/specs/integrations/*/discord.md) and
+# docs/design/plan.md.
 id: "kandev-plugin-discord"
 api_version: 2
 version: "0.1.0"
 display_name: "Discord"
-description: "One Discord channel per Kandev task: agent updates in the channel, channel messages delivered to the task, and /status, /stop, /approve slash commands."
+description: "One Discord channel per Kandev task: agent updates in the channel, channel messages delivered to the task, and /status, /stop, /approve, /deny, /link slash commands."
 author: "Fclem"
 categories: ["connector"]
 repo_url: "https://github.com/Fclem/kandev-plugin-discord"
 
-# Floor of the public plugin SDK 0.1.0 (and >= 0.91.1, required by
-# `access: admin` actions). Raise it when this plugin adopts Host additions
-# that ship in a later Kandev release.
+# RELEASE BLOCKER: this plugin uses Host APIs merged in kdlbs/kandev#5438
+# (CancelTurn, linked accounts, step approval, Message.Source), which no
+# Kandev release ships yet. Raise this to the first release containing
+# commit 83cecc58 together with pluginsdk/@kdlbs/plugin-sdk 0.5.0
+# (docs/design/plan.md "SDK gate"). Development hosts ignore the minimum.
 min_kandev_version: "0.99.0"
 
 runtime:
@@ -29,11 +30,39 @@ runtime:
     darwin-arm64: "server/plugin-darwin-arm64"
     windows-amd64: "server/plugin-windows-amd64.exe"
 
-# Host-authenticated browser actions. The settings card calls
-# connection.test once per bound workspace; Kandev enforces the admin role
-# before the plugin sees the request.
+# Events are triggers only; content is read through Messages().List. The
+# plugin never subscribes to message.* (one event per streamed chunk).
+# Host v2 grants a workspace manager approves in Settings > Plugins >
+# Workspace access: host.v2.read:{sessions,interactions} for execution IDs and
+# interaction revisions, host.v2.write:execution for /stop and step approval,
+# host.v2.write:interactions and host.v2.write:human_responses for /link and
+# approvals by linked Kandev users.
+capabilities:
+  events:
+    - "task.created"
+    - "task.updated"
+    - "task.state_changed"
+    - "task.deleted"
+    - "task.moved"
+    - "turn.completed"
+    - "task_session.state_changed"
+    - "message.queue.status_changed"
+    - "permission_request.received.*"
+    - "clarification.answered"
+    - "clarification.cancelled"
+  api_read: ["tasks", "sessions", "messages", "interactions", "workflows"]
+  api_write: ["messages", "execution", "interactions", "human_responses"]
+  state: true
+
+# Host-authenticated browser actions for the settings card. Kandev enforces
+# the admin role before the plugin sees the request. connection.test calls
+# Discord; connection.status returns the cached gateway health only.
 actions:
   - key: "connection.test"
+    scope: "workspace"
+    access: "admin"
+    max_body_bytes: 1024
+  - key: "connection.status"
     scope: "workspace"
     access: "admin"
     max_body_bytes: 1024

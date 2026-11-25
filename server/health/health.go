@@ -5,14 +5,14 @@ package health
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
+	"github.com/bwmarrin/discordgo"
+
 	"kandev-plugin-discord/server/config"
-	"kandev-plugin-discord/server/discord"
+	"kandev-plugin-discord/server/discordapi"
 )
 
 // Check statuses.
@@ -49,11 +49,11 @@ type Result struct {
 	Checks      []Check `json:"checks"`
 }
 
-// API is the Discord surface the test needs; *discord.Client satisfies it.
+// API is the Discord surface the test needs; discordapi.API satisfies it.
 type API interface {
-	CurrentUser(ctx context.Context) (discord.User, error)
-	CurrentApplication(ctx context.Context) (discord.Application, error)
-	CurrentUserGuilds(ctx context.Context) ([]discord.PartialGuild, error)
+	CurrentUser(ctx context.Context) (*discordgo.User, error)
+	CurrentApplication(ctx context.Context) (*discordgo.Application, error)
+	CurrentUserGuilds(ctx context.Context) ([]*discordgo.UserGuild, error)
 }
 
 // Test runs every check that its prerequisites allow; later checks are
@@ -126,7 +126,7 @@ func (r *report) checkApplication(ctx context.Context, api API, cfg config.Confi
 	} else {
 		r.add(CheckApplication, Pass, "application "+app.Name)
 	}
-	if discord.MessageContentIntentEnabled(app.Flags) {
+	if discordapi.MessageContentIntentEnabled(uint64(app.Flags)) {
 		r.add(CheckIntent, Pass, "Message Content intent is enabled")
 	} else {
 		r.add(CheckIntent, Fail, "Message Content intent is disabled: Developer Portal > Bot > Privileged Gateway Intents > Message Content Intent")
@@ -140,10 +140,10 @@ func (r *report) checkGuild(ctx context.Context, api API, cfg config.Config, bin
 		r.add(CheckPermissions, Skip, "skipped: server list could not be read")
 		return
 	}
-	var guild *discord.PartialGuild
-	for i := range guilds {
-		if guilds[i].ID == binding.GuildID {
-			guild = &guilds[i]
+	var guild *discordgo.UserGuild
+	for _, g := range guilds {
+		if g.ID == binding.GuildID {
+			guild = g
 		}
 	}
 	if guild == nil {
@@ -153,12 +153,8 @@ func (r *report) checkGuild(ctx context.Context, api API, cfg config.Config, bin
 		return
 	}
 	r.add(CheckMembership, Pass, "member of "+guild.Name)
-	granted, err := strconv.ParseUint(guild.Permissions, 10, 64)
-	if err != nil {
-		r.add(CheckPermissions, Fail, "Discord returned an unreadable permission set")
-		return
-	}
-	if missing := discord.MissingPermissions(granted); len(missing) > 0 {
+	granted := uint64(guild.Permissions)
+	if missing := discordapi.MissingPermissions(granted); len(missing) > 0 {
 		r.add(CheckPermissions, Fail, "missing: "+strings.Join(missing, ", ")+"; re-invite with the link below or grant them to the bot's role")
 		r.setInvite(cfg, binding)
 		return
@@ -168,7 +164,7 @@ func (r *report) checkGuild(ctx context.Context, api API, cfg config.Config, bin
 
 func (r *report) setInvite(cfg config.Config, binding config.Binding) {
 	if cfg.ApplicationID != "" {
-		r.res.InviteURL = discord.InviteURL(cfg.ApplicationID, binding.GuildID)
+		r.res.InviteURL = discordapi.InviteURL(cfg.ApplicationID, binding.GuildID)
 	}
 }
 
@@ -180,8 +176,7 @@ func configDetail(primary string, cfgErr error) string {
 }
 
 func tokenDetail(err error) string {
-	var apiErr *discord.APIError
-	if errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized {
+	if discordapi.Status(err) == http.StatusUnauthorized {
 		return "Discord rejected the bot token (401): reset it on the Bot page and save it again"
 	}
 	return err.Error()
