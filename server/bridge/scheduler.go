@@ -48,9 +48,9 @@ func (s *Scheduler) drain(key string) {
 		job := q[0]
 		s.queues[key] = q[1:]
 		s.mu.Unlock()
-		if s.ctx.Err() == nil {
-			job(s.ctx)
-		}
+		// Jobs run even after cancellation (their calls fail fast), so
+		// waiters on a job never hang.
+		job(s.ctx)
 	}
 }
 

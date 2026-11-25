@@ -233,7 +233,7 @@ Wave 4:
 Wave 5:
 - [x] [task-04-host-plugin-docs](task-04-host-plugin-docs.md)  (#5438)
 - [x] [task-10-plugin-inbound-delivery](task-10-plugin-inbound-delivery.md)
-- [ ] [task-11-plugin-status-stop-commands](task-11-plugin-status-stop-commands.md)
+- [x] [task-11-plugin-status-stop-commands](task-11-plugin-status-stop-commands.md)
 
 Wave 6:
 - [ ] [task-12-plugin-permission-approvals](task-12-plugin-permission-approvals.md)  (/link, permissions, steps)

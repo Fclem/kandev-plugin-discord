@@ -1,7 +1,7 @@
 ---
 id: "11-plugin-status-stop-commands"
 title: "/status and /stop commands"
-status: pending
+status: done
 wave: 5
 depends_on: ["06-plugin-gateway-provisioning", "02-host-control-rpcs"]
 plan: "plan.md"
@@ -49,4 +49,24 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **Router** (`server/commands/router.go`): unbound guild → immediate
+  ephemeral reply; commands are deferred ephemerally before any Kandev
+  call and answered by editing the deferred response; task commands
+  resolve the channel through the reverse index, otherwise "Commands work
+  only in Kandev task channels."
+- **`/status`** (anyone): title and identifier, state (+ archived), step
+  name, each session's state, cached queue depth, pending interaction
+  count, deep link.
+- **`/stop [scope]`** (operators): execution IDs and session versions from
+  `ExactSessions`; `turn` → `CancelTurn` for running sessions, `task` →
+  `StopTaskRun` for every session with an execution; capability revision
+  and manifest digest from `GetCapabilityContext`; empty management key,
+  generation 0; idempotency key `discord:stop:<scope>:<interaction>:<session>`.
+  Outcomes: applied, `NO_CHANGE` → "Nothing is running.", `CONFLICT`,
+  `DENIED`/`PermissionDenied` → grant message, `UNSUPPORTED`/
+  `Unimplemented` → unsupported.
+- **Bridge.** `INTERACTION_CREATE` → router (LRU dedupe); the scheduler
+  now runs queued jobs even after cancellation so waiters never hang.
+- **Tests:** `go test -race ./server/...` passed (deferral first and
+  ephemeral, placement, unbound guild, status content, turn fences, task
+  scope, refusal, every outcome, missing grant).
