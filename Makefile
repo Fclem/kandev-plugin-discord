@@ -20,9 +20,16 @@ KANDEV_TOOLING ?= $(CURDIR)/.build/kandev-tooling/apps/backend
 sdk-check:
 	go run github.com/kdlbs/kandev/pluginsdk/cmd/kandev-sdk-check@v0.1.0 --manifest manifest.yaml --frontend-sdk node_modules/@kdlbs/plugin-sdk
 
+# Prerequisite of build and package targets. While go.mod pins the unreleased
+# pluginsdk pseudo-version (see docs/design/plan.md "SDK gate"), sdk-check
+# fails by design and blocks release; local development may run
+# `make build SDK_GATE=` or `make verify-package-host SDK_GATE=`. CI and the
+# release workflow always run `make sdk-check` explicitly.
+SDK_GATE ?= sdk-check
+
 ## Build the plugin binary for the host platform (development use). kandev
 ## itself always installs from `make package`/`package-host` output, not this.
-build: sdk-check
+build: $(SDK_GATE)
 	mkdir -p bin
 	go build -o $(BIN) ./server
 
@@ -62,7 +69,7 @@ vet:
 ## manifest.yaml's runtime.executables, stage manifest.yaml + ui/ alongside
 ## them, and pack the tree into $(PKG_OUT) with
 ## backend-owned cmd/plugin-pack from the pinned tooling checkout. Install the tarball via Settings > Plugins or curl -F package=@...
-package: sdk-check
+package: $(SDK_GATE)
 	rm -rf $(STAGE)
 	mkdir -p $(STAGE)/server
 	cp manifest.yaml $(STAGE)/manifest.yaml
@@ -78,7 +85,7 @@ package: sdk-check
 
 ## Package for the host platform only — faster local iteration than the full
 ## 5-platform `make package` (matches plugin-pack's -platform-only).
-package-host: sdk-check
+package-host: $(SDK_GATE)
 	rm -rf $(STAGE)
 	mkdir -p $(STAGE)/server
 	cp manifest.yaml $(STAGE)/manifest.yaml
