@@ -47,6 +47,10 @@ func (c *call) stop(ctx context.Context, taskID, scope string) {
 		c.reply(ctx, hostErrorText(err, msgExecutionGrant))
 		return
 	}
+	if capability.ApprovalRevision == 0 {
+		c.reply(ctx, msgExecutionGrant)
+		return
+	}
 	var lines []string
 	for _, s := range targets {
 		cmd := pluginsdk.ExactTaskExecutionCommand{

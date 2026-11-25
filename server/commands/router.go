@@ -60,7 +60,10 @@ func (r *Router) Handle(ctx context.Context, i *discordgo.Interaction) {
 	c := &call{Router: r, i: i, guild: guild, binding: binding,
 		userID: authz.UserID(i.Member, i.User), userName: authz.DisplayName(i.Member, i.User)}
 	c.operator = authz.IsOperator(r.Config, guild.OperatorRoleID, i.Member, c.userID)
-
+	if i.Type == discordgo.InteractionApplicationCommandAutocomplete {
+		c.autocomplete(ctx)
+		return
+	}
 	if err := r.API.InteractionRespond(ctx, i, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Flags: discordgo.MessageFlagsEphemeral},
@@ -68,13 +71,20 @@ func (r *Router) Handle(ctx context.Context, i *discordgo.Interaction) {
 		log.Printf("discord: deferring interaction %s: %v", i.ID, err)
 		return
 	}
-	if i.Type == discordgo.InteractionApplicationCommand {
+	switch i.Type {
+	case discordgo.InteractionApplicationCommand:
 		c.command(ctx)
+	case discordgo.InteractionMessageComponent:
+		c.button(ctx)
 	}
 }
 
 func (c *call) command(ctx context.Context) {
 	data := c.i.ApplicationCommandData()
+	if data.Name == CmdLink {
+		c.link(ctx, optionString(data.Options, OptCode))
+		return
+	}
 	taskID, ok := c.taskOfChannel(ctx)
 	if !ok {
 		c.reply(ctx, "Commands work only in Kandev task channels.")
@@ -89,6 +99,10 @@ func (c *call) command(ctx context.Context) {
 			scope = ScopeTurn
 		}
 		c.stop(ctx, taskID, scope)
+	case CmdApprove:
+		c.approve(ctx, taskID, optionString(data.Options, OptRequest), true)
+	case CmdDeny:
+		c.approve(ctx, taskID, optionString(data.Options, OptRequest), false)
 	default:
 		c.reply(ctx, "Unknown command.")
 	}

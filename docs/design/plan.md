@@ -236,7 +236,7 @@ Wave 5:
 - [x] [task-11-plugin-status-stop-commands](task-11-plugin-status-stop-commands.md)
 
 Wave 6:
-- [ ] [task-12-plugin-permission-approvals](task-12-plugin-permission-approvals.md)  (/link, permissions, steps)
+- [x] [task-12-plugin-permission-approvals](task-12-plugin-permission-approvals.md)  (/link, permissions, steps)
 - [ ] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)
 
 Wave 7:

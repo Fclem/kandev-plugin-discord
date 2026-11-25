@@ -9,6 +9,7 @@ import (
 	"github.com/kdlbs/kandev/pluginsdk"
 
 	"kandev-plugin-discord/server/outbound"
+	"kandev-plugin-discord/server/prompts"
 	"kandev-plugin-discord/server/store"
 )
 
@@ -53,6 +54,12 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 	}
 	if retry > 0 {
 		b.kickAfter(task.ID, retry)
+	}
+	if next.Status == store.StatusActive {
+		poster := &prompts.Poster{API: b.api, Host: b.host, Store: b.st, TaskURL: b.cfg.TaskURL, Now: b.now}
+		if err := poster.Sync(ctx, task, next, sessions); err != nil {
+			log.Printf("discord: task %s: prompts: %v", task.ID, err)
+		}
 	}
 	if b.cfg.LiveUpdateInterval > 0 && anyRunning(sessions) {
 		b.kickAfter(task.ID, b.cfg.LiveUpdateInterval)

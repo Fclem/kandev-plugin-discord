@@ -1,7 +1,7 @@
 ---
 id: "12-plugin-permission-approvals"
 title: "/link and approvals through linked-user receipts"
-status: pending
+status: done
 wave: 6
 depends_on: ["11-plugin-status-stop-commands", "09-plugin-outbound-mirroring", "15-host-delegated-human-responses", "16-host-step-approval-rpcs"]
 plan: "plan.md"
@@ -67,4 +67,36 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **`/link`** (`server/commands/link.go`): any member, any channel of a
+  bound guild; `LinkExternalIdentity{Provider: "discord", Subject, DisplayName}`;
+  replies never echo the code; grant denials keep the code valid.
+- **Prompts** (`server/prompts`): one permission message per pending
+  interaction (≤ 25 buttons in rows of 5, allow green / reject red,
+  `kd:perm:<id>:<index>`; overflow links to Kandev), one notice per
+  clarification, resolution edits with `ResolvedBy` ("✅ Approved by Alice
+  via discord.") or "resolved elsewhere" and no buttons; one step prompt per
+  awaiting `GetStepApproval` of a non-running session (`kd:step:<session>`),
+  cleared when no longer awaiting; Office (`Unimplemented`) and missing
+  grants post nothing. Runs in every active-channel sync (events,
+  reconcile).
+- **Approvals** (`server/commands/approve.go`, `buttons.go`): operators only;
+  capability context first (`ApprovalRevision == 0` → grant message without
+  a receipt request); permission: `ExactInteraction` revision → receipt
+  (`HumanResponseKindPermission`, exact option) → `RespondPermission`; step:
+  `GetStepApproval` → receipt (`HumanResponseKindStepApproval`, session
+  target) → `ApproveStep` (idempotency `discord:approve:<interaction>`).
+  `/approve` picks `allow_once` then `allow_*`; `/deny` picks `reject_once`
+  then `reject_*`; no argument: single permission, else "choose one", else
+  the step (`/deny` never). Outcomes: unlinked → deep link + `/link` how-to;
+  `linked_user_not_authorized`; grant reasons → grant message; conflicts /
+  not found → "already resolved" and the prompt is marked;
+  `step_not_awaiting_approval`; `step_approval_changed`; Office →
+  "approve it in Kandev". Prompt edits run on the task queue, then the task
+  re-syncs. Autocomplete lists permissions and (for `/approve`) steps.
+- **Tests:** `go test -race ./server/...` passed (`prompts`: posting once,
+  overflow, resolution with actor, clarification notice, step lifecycle,
+  Office/running; `commands`: linked button with exact receipt and
+  response fields, unlinked, missing grant (revision 0 and denial),
+  non-operator, already resolved (read and conflict), default option picks
+  and `request`, step approval fields, step outcomes and Office, `/link`
+  outcomes and no echo, autocomplete).
