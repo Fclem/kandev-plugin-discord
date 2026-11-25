@@ -104,6 +104,7 @@ func (b *Bridge) Run(ctx context.Context, sess *discordgo.Session) gateway.State
 	sess.AddHandler(func(_ *discordgo.Session, g *discordgo.GuildCreate) { b.onGuildCreate(ctx, g.Guild) })
 	sess.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) { b.onChannelDelete(ctx, c.Channel) })
 	sess.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
+	go b.reconcileLoop(ctx)
 	final := sup.Run(ctx)
 	b.timers.stopAll()
 	return final
@@ -133,13 +134,18 @@ func (b *Bridge) onReady(ctx context.Context, r *discordgo.Ready) {
 	b.saveHealth(ctx)
 }
 
-// onGuildCreate provisions a bound guild.
+// onGuildCreate provisions a bound guild, then reconciles its workspace:
+// Discord does not replay events missed while the bridge was offline.
 func (b *Bridge) onGuildCreate(ctx context.Context, g *discordgo.Guild) {
 	binding, ok := b.cfg.BindingForGuild(g.ID)
 	if !ok || g.Unavailable {
 		return
 	}
-	b.sched.Do("guild:"+g.ID, func(ctx context.Context) { b.provisionGuild(ctx, binding) })
+	b.sched.Do("guild:"+g.ID, func(ctx context.Context) {
+		if b.provisionGuild(ctx, binding) {
+			b.reconcileWorkspace(ctx, binding)
+		}
+	})
 }
 
 func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) bool {

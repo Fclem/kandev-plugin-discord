@@ -1,7 +1,7 @@
 ---
 id: "08-plugin-reconciler"
 title: "Reconciler and per-task scheduler"
-status: pending
+status: done
 wave: 4
 depends_on: ["07-plugin-channel-lifecycle"]
 plan: "plan.md"
@@ -41,4 +41,17 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **Scheduler** (`server/bridge/scheduler.go`): one goroutine per key while
+  it has work, jobs in order; `Kick` coalesces syncs; event-ID LRU (4096).
+- **Reconcile** (`server/bridge/reconcile.go`): after provisioning on each
+  `GUILD_CREATE` (READY and later joins) and every 5 minutes; lists tasks
+  with `IncludeArchived` (paginated in `kandev.SDK.ListTasks`), kicks every
+  task that wants a channel or still has a live record, and every indexed
+  channel whose task is gone (`GetTask` → `NotFound` → closed). Capacity
+  and deleted records retry through the same sync; retention deletes come
+  from the channel state machine's deferred kicks.
+- **Prompts** in the same sync land with task-12.
+- **Tests:** `go test -race ./server/bridge/` passed: downtime catch-up
+  creates exactly the missing channels and none for an archived task; a
+  second reconcile makes zero Discord mutations; a deleted task's channel is
+  archived; a manually deleted channel is recreated; per-key ordering.
