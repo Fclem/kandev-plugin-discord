@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
 	"kandev-plugin-discord/server/config"
 	"kandev-plugin-discord/server/discordapi"
+	"kandev-plugin-discord/server/store"
 )
 
 // Check statuses.
@@ -47,6 +49,47 @@ type Result struct {
 	GuildID     string  `json:"guild_id,omitempty"`
 	InviteURL   string  `json:"invite_url,omitempty"`
 	Checks      []Check `json:"checks"`
+	// Gateway is the bridge's cached state (connection.status); it does not
+	// affect OK, which covers the live checks only.
+	Gateway GatewayStatus `json:"gateway"`
+}
+
+// GatewayStatus is the cached bridge state for one workspace, served by
+// connection.status without calling Discord.
+type GatewayStatus struct {
+	State         string `json:"state"`
+	Detail        string `json:"detail,omitempty"`
+	CloseCode     int    `json:"close_code,omitempty"`
+	Identifies24h int    `json:"identifies_24h"`
+	ConfigError   string `json:"config_error,omitempty"`
+	BotMember     bool   `json:"bot_member"`
+	Provisioned   bool   `json:"provisioned"`
+	InviteURL     string `json:"invite_url,omitempty"`
+	Error         string `json:"error,omitempty"`
+	CheckedAt     string `json:"checked_at,omitempty"`
+}
+
+// StateUnknown means the bridge has not reported yet.
+const StateUnknown = "unknown"
+
+// Status projects the cached health record onto one workspace.
+func Status(h store.Health, workspaceID string) GatewayStatus {
+	s := GatewayStatus{
+		State: h.GatewayState, Detail: h.Reason, CloseCode: h.LastCloseCode,
+		Identifies24h: h.IdentifyCount24h, ConfigError: h.ConfigError,
+	}
+	if s.State == "" {
+		s.State = StateUnknown
+	}
+	if !h.CheckedAt.IsZero() {
+		s.CheckedAt = h.CheckedAt.UTC().Format(time.RFC3339)
+	}
+	for _, b := range h.Bindings {
+		if b.WorkspaceID == workspaceID {
+			s.BotMember, s.Provisioned, s.InviteURL, s.Error = b.BotMember, b.Provisioned, b.InviteURL, b.Error
+		}
+	}
+	return s
 }
 
 // API is the Discord surface the test needs; discordapi.API satisfies it.

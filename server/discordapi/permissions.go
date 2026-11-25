@@ -18,16 +18,11 @@ const Administrator uint64 = 1 << 3
 // Permission bits used in channel and category overwrites (discordgo's
 // int64 representation).
 const (
-	PermManageChannels     int64 = 1 << 4
 	PermAddReactions       int64 = 1 << 6
 	PermViewChannel        int64 = 1 << 10
 	PermSendMessages       int64 = 1 << 11
 	PermEmbedLinks         int64 = 1 << 14
 	PermReadMessageHistory int64 = 1 << 16
-	PermManageRoles        int64 = 1 << 28
-	PermUseAppCommands     int64 = 1 << 31
-	PermSendInThreads      int64 = 1 << 38
-	PermCreatePublicThread int64 = 1 << 35
 	PermPinMessages        int64 = 1 << 51
 )
 

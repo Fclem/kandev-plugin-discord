@@ -219,7 +219,7 @@ Wave 2:
 - [x] [task-02-host-control-rpcs](task-02-host-control-rpcs.md)  (CancelTurn, #5438)
 - [x] ~~[task-03-host-plugin-event-sanitization](task-03-host-plugin-event-sanitization.md)~~  (cancelled; docs corrected in #5438)
 - [x] [task-17-host-message-source](task-17-host-message-source.md)  (#5438)
-- [ ] [task-06-plugin-gateway-provisioning](task-06-plugin-gateway-provisioning.md)
+- [x] [task-06-plugin-gateway-provisioning](task-06-plugin-gateway-provisioning.md)
 
 Wave 3:
 - [x] [task-15-host-delegated-human-responses](task-15-host-delegated-human-responses.md)  (#5438)

@@ -1,7 +1,7 @@
 ---
 id: "06-plugin-gateway-provisioning"
 title: "Gateway lifecycle and guild provisioning"
-status: pending
+status: done
 wave: 2
 depends_on: ["05-plugin-bootstrap-config"]
 plan: "plan.md"
@@ -54,4 +54,27 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **Start.** `discordPlugin.SetHost` starts `runBridge` once; an invalid
+  config writes `health.config_error` and leaves the bridge off.
+  `bridge.Run` sets intents `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT`,
+  turns off discordgo's reconnect and state cache, and registers handlers.
+- **Supervisor** (`server/gateway`): fatal codes 4004/4010–4014 stop with a
+  token-free reason; the REST 401 halt stops it; jittered exponential
+  backoff (1 s → 2 min); `StoreBudget` keeps hourly READY counts in
+  `instance//identify_budget` and refuses to connect at 900 in 24 h.
+- **Store** (`server/store`): typed guild, channel (with reverse index),
+  prompts, step approval, health, and identify records; `MemoryHost` fake.
+- **Provisioning** (`server/provision`): roles, categories (with rollover
+  support), `#kandev-status`, overwrites (`@everyone` hidden, operators
+  read/write, viewers and archives read-only), command registration by
+  hash. A second run makes zero mutations (test).
+- **Membership.** `onReady` records missing guilds with the invite URL in
+  the health record and logs it; unbound `GUILD_CREATE`s are ignored.
+- **Also:** `server/kandev` facade (`SDK` over the v1 readers and the v2
+  extensions) and its `Fake`; `server/commands/defs.go` (`/link`, `/status`,
+  `/stop`, `/approve`, `/deny`); `connection.status` serves the cached
+  health per workspace without Discord calls.
+- **Tests:** `go test -race ./server/...` passed (gateway: fatal codes,
+  halt, budget refusal, window pruning, reconnect, backoff bounds;
+  provision: create-once, reuse by name, command hash; bridge: invite
+  report, bound-guild provisioning; plugin: single start, cached status).
