@@ -20,6 +20,8 @@ type API interface {
 	CurrentApplication(ctx context.Context) (*discordgo.Application, error)
 	CurrentUserGuilds(ctx context.Context) ([]*discordgo.UserGuild, error)
 
+	// GuildMember returns a member with roles (REST; no privileged intent).
+	GuildMember(ctx context.Context, guildID, userID string) (*discordgo.Member, error)
 	GuildRoles(ctx context.Context, guildID string) ([]*discordgo.Role, error)
 	GuildRoleCreate(ctx context.Context, guildID string, params *discordgo.RoleParams) (*discordgo.Role, error)
 	GuildChannels(ctx context.Context, guildID string) ([]*discordgo.Channel, error)

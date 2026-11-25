@@ -15,7 +15,7 @@ import (
 
 func (h *harness) reconcile(t *testing.T) {
 	t.Helper()
-	h.b.reconcileWorkspace(context.Background(), config.Binding{WorkspaceID: wsID, GuildID: guildID})
+	h.b.reconcileWorkspace(context.Background(), config.Binding{WorkspaceID: wsID, GuildID: guildID}, false)
 	h.wait()
 }
 

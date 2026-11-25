@@ -19,7 +19,7 @@ type Call struct {
 // readMethods never mutate Discord state.
 var readMethods = map[string]bool{
 	"CurrentUser": true, "CurrentApplication": true, "CurrentUserGuilds": true,
-	"GuildRoles": true, "GuildChannels": true, "ChannelMessages": true,
+	"GuildRoles": true, "GuildChannels": true, "ChannelMessages": true, "GuildMember": true,
 }
 
 // Fake is an in-memory API for tests. It keeps roles, channels, messages,
@@ -33,6 +33,7 @@ type Fake struct {
 	UserGuilds  []*discordgo.UserGuild
 
 	Roles     map[string][]*discordgo.Role    // guild → roles
+	Members   map[string]*discordgo.Member    // user id → member
 	Channels  map[string]*discordgo.Channel   // channel id → channel
 	Messages  map[string][]*discordgo.Message // channel id → messages, oldest first
 	Reactions map[string][]string             // message id → emoji
@@ -53,6 +54,7 @@ func NewFake() *Fake {
 	return &Fake{
 		BotUser:      &discordgo.User{ID: "900000000000000001", Username: "kandev", Bot: true},
 		Roles:        map[string][]*discordgo.Role{},
+		Members:      map[string]*discordgo.Member{},
 		Channels:     map[string]*discordgo.Channel{},
 		Messages:     map[string][]*discordgo.Message{},
 		Reactions:    map[string][]string{},
@@ -226,6 +228,19 @@ func (f *Fake) CurrentUserGuilds(context.Context) ([]*discordgo.UserGuild, error
 		return nil, err
 	}
 	return slices.Clone(f.UserGuilds), nil
+}
+
+func (f *Fake) GuildMember(_ context.Context, guildID, userID string) (*discordgo.Member, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("GuildMember", guildID, userID); err != nil {
+		return nil, err
+	}
+	m, ok := f.Members[userID]
+	if !ok {
+		return nil, &Error{Status: 404, Code: 10007, Message: "Unknown Member"}
+	}
+	return m, nil
 }
 
 func (f *Fake) GuildRoles(_ context.Context, guildID string) ([]*discordgo.Role, error) {

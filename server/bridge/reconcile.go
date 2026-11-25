@@ -32,14 +32,15 @@ func (b *Bridge) reconcileAll() {
 		if _, ok := b.guild(binding.WorkspaceID); !ok {
 			continue
 		}
-		b.sched.Do("guild:"+binding.GuildID, func(ctx context.Context) { b.reconcileWorkspace(ctx, binding) })
+		b.sched.Do("guild:"+binding.GuildID, func(ctx context.Context) { b.reconcileWorkspace(ctx, binding, false) })
 	}
 }
 
 // reconcileWorkspace queues a sync for every task that has, or should have,
 // a channel, and for every indexed channel whose task vanished. Syncs are
-// idempotent, so an unchanged workspace causes no Discord mutation.
-func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding) {
+// idempotent, so an unchanged workspace causes no Discord mutation. After a
+// READY it also queues the inbound catch-up of each channel, after its sync.
+func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding, afterReady bool) {
 	tasks, err := b.host.ListTasks(ctx, binding.WorkspaceID, b.cfg.IncludeEphemeralTasks)
 	if err != nil {
 		log.Printf("discord: reconcile workspace %s: listing tasks: %v", binding.WorkspaceID, err)
@@ -63,9 +64,15 @@ func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding)
 		log.Printf("discord: reconcile workspace %s: reading channel index: %v", binding.WorkspaceID, err)
 		return
 	}
-	for _, ix := range index {
-		if ix.WorkspaceID == binding.WorkspaceID && !seen[ix.TaskID] {
+	for channelID, ix := range index {
+		if ix.WorkspaceID != binding.WorkspaceID {
+			continue
+		}
+		if !seen[ix.TaskID] {
 			b.Kick(ix.TaskID)
+		}
+		if afterReady {
+			b.catchUp(ix.TaskID, channelID)
 		}
 	}
 }

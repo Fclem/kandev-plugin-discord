@@ -104,6 +104,7 @@ func (b *Bridge) Run(ctx context.Context, sess *discordgo.Session) gateway.State
 	})
 	sess.AddHandler(func(_ *discordgo.Session, g *discordgo.GuildCreate) { b.onGuildCreate(ctx, g.Guild) })
 	sess.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) { b.onChannelDelete(ctx, c.Channel) })
+	sess.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) { b.onMessageCreate(ctx, m) })
 	sess.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
 	go b.reconcileLoop(ctx)
 	final := sup.Run(ctx)
@@ -144,7 +145,7 @@ func (b *Bridge) onGuildCreate(ctx context.Context, g *discordgo.Guild) {
 	}
 	b.sched.Do("guild:"+g.ID, func(ctx context.Context) {
 		if b.provisionGuild(ctx, binding) {
-			b.reconcileWorkspace(ctx, binding)
+			b.reconcileWorkspace(ctx, binding, true)
 		}
 	})
 }

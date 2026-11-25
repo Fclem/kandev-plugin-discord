@@ -175,3 +175,28 @@ func TestTurnCompletedMirrorsAgentOutputWithoutEchoes(t *testing.T) {
 	h.event(t, "e2", "task_session.state_changed", map[string]any{"session_id": "s1"})
 	assert.Equal(t, []string{"Fixed it."}, h.texts(rec.ChannelID), "session-only event maps to the task; nothing new")
 }
+
+func TestOperatorChannelMessageReachesTheTaskOnce(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	ctx := context.Background()
+	msg := &discordgo.MessageCreate{Message: &discordgo.Message{
+		ID: h.api.NewID(), ChannelID: rec.ChannelID, GuildID: guildID, Content: "ship it",
+		Author: &discordgo.User{ID: "500000000000000001", Username: "alice"},
+		Member: &discordgo.Member{Roles: []string{g.OperatorRoleID}},
+	}}
+	h.b.onMessageCreate(ctx, msg)
+	h.b.onMessageCreate(ctx, msg)
+	h.wait()
+	assert.Equal(t, []kandev.SentMessage{{TaskID: "1", Text: "alice (Discord): ship it"}}, h.host.Sent)
+	assert.Equal(t, msg.ID, h.channel(t, "1").InboundCursor)
+
+	other := *msg.Message
+	other.ID, other.GuildID = h.api.NewID(), "999999999999999999"
+	h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: &other})
+	h.wait()
+	assert.Len(t, h.host.Sent, 1, "unbound guild ignored")
+}

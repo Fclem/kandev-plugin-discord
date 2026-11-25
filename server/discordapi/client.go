@@ -92,6 +92,11 @@ func (c *Client) CurrentUserGuilds(ctx context.Context) (gs []*discordgo.UserGui
 	return gs, err
 }
 
+func (c *Client) GuildMember(ctx context.Context, guildID, userID string) (m *discordgo.Member, err error) {
+	err = c.do(ctx, func(o discordgo.RequestOption) error { m, err = c.s.GuildMember(guildID, userID, o); return err })
+	return m, err
+}
+
 func (c *Client) GuildRoles(ctx context.Context, guildID string) (rs []*discordgo.Role, err error) {
 	err = c.do(ctx, func(o discordgo.RequestOption) error { rs, err = c.s.GuildRoles(guildID, o); return err })
 	return rs, err

@@ -1,7 +1,7 @@
 ---
 id: "10-plugin-inbound-delivery"
 title: "Discord → Kandev delivery with authorization"
-status: pending
+status: done
 wave: 5
 depends_on: ["08-plugin-reconciler", "09-plugin-outbound-mirroring"]
 plan: "plan.md"
@@ -45,4 +45,26 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
 
 ## Results
 
-Pending.
+- **`server/authz`.** `IsOperator` (operator role in the payload's member
+  roles, or `allowed_user_ids`), `DisplayName` (nick → global name →
+  username).
+- **`server/inbound`.** `Deliverable` drops bots, webhooks, system message
+  types, and empty text. `Handler.Handle` skips IDs at or before
+  `inbound_cursor`; non-operators get one ⛔; operators' text goes to
+  `Messages().Send(task, "", "<name> (Discord): <text>")` with
+  `inbound_inflight` saved first; `queued` → 🕒, `sent`/`started` → ✅,
+  errors → ⚠️ plus a reply mapped from the gRPC code
+  (`ResourceExhausted` queue full, `FailedPrecondition` inactive, `Aborted`
+  changed/claimed, `PermissionDenied`, `NotFound`, otherwise unavailable).
+  An in-flight ID found later is answered "delivery uncertain" and never
+  resent. `CatchUp` pages `ChannelMessages` after the cursor, oldest
+  first; older than `inbound_catchup_max_age_minutes` → ⚠️ "not delivered —
+  the bridge was offline"; REST messages carry no roles, so the operator
+  check reads the member (`GuildMember`, added to `discordapi`).
+- **Bridge.** `MESSAGE_CREATE` → bound guild, indexed channel, LRU dedupe,
+  then the task's queue (active record only). Catch-up is queued per indexed
+  channel by the post-`READY` reconcile, after that task's sync.
+- **Tests:** `go test -race ./server/...` passed (`inbound`: outcomes and
+  reactions, refusal once, no double send incl. in-flight, catch-up age
+  split and idempotence, filters; `authz`; `bridge`: operator message
+  delivered once, unbound guild ignored).
