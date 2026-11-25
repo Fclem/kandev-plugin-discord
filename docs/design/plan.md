@@ -240,12 +240,18 @@ Wave 6:
 - [x] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)
 
 Wave 7:
-- [ ] [task-14-plugin-artifact-smoke-release](task-14-plugin-artifact-smoke-release.md)
+- [ ] [task-14-plugin-artifact-smoke-release](task-14-plugin-artifact-smoke-release.md)  (blocked: live Discord smoke, SDK gate)
 ```
 
 ## Verification Results
 
-Pending; filled per task in each task's `## Results`.
+- Tasks 05–13: done; `go test -race ./server/...` and the UI contract tests
+  pass (see each task's `## Results`).
+- Task 14: packages build and verify for all five platforms; install,
+  settings, grants, link codes, upgrade, disable/enable, and uninstall pass
+  on a disposable Kandev from `main`. Live Discord scenarios are blocked:
+  this host cannot reach Discord and no test bot was provided.
+- `make sdk-check` fails by design until SDK 0.5.0 ships.
 
 ## Risks
 
