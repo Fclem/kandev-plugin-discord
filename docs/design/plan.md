@@ -237,7 +237,7 @@ Wave 5:
 
 Wave 6:
 - [x] [task-12-plugin-permission-approvals](task-12-plugin-permission-approvals.md)  (/link, permissions, steps)
-- [ ] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)
+- [x] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)
 
 Wave 7:
 - [ ] [task-14-plugin-artifact-smoke-release](task-14-plugin-artifact-smoke-release.md)

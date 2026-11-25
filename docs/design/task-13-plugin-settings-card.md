@@ -1,7 +1,7 @@
 ---
 id: "13-plugin-settings-card"
 title: "Quick-setup settings card with connection test and status"
-status: in_progress
+status: done
 wave: 6
 depends_on: ["06-plugin-gateway-provisioning"]
 plan: "plan.md"
@@ -42,7 +42,21 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/mobile-parity` and `/tdd`.
 
 ## Results
 
-Partial from the scaffold (`105108d`): card with workspace IDs, invite links,
-and `connection.test`; backend checks for token, application, intent,
-membership, and permissions. Remaining: gateway state, `connection.status`,
-and a live-host visual check.
+- **Scaffold (`105108d`):** card with workspace IDs, invite links, and
+  `connection.test`; backend checks for token, application, intent,
+  membership, and permissions.
+- **Backend:** `connection.status` returns `health.Status` (gateway state,
+  close code, reason, identify count, config error, membership,
+  provisioning, invite URL) from the cached `instance//health` record
+  without Discord calls; `connection.test` adds the same block as
+  `gateway`. Neither contains token material (test).
+- **Card:** each binding row loads `connection.status` on mount (aborted on
+  unmount; no poller) and after **Test connection**, and shows a one-line
+  bridge summary (`gatewaySummary`: 4014 → enable the Message Content
+  intent, 4004 → token rejected, not configured, not a member,
+  provisioning, budget exhausted). The description explains the workspace
+  grants and `/link`. Layout unchanged: wrapping rows and `min-h-9` touch
+  targets.
+- **Tests:** `make test` (6 UI contract tests incl. `gatewaySummary`;
+  Go: `TestConnectionStatusServesCachedHealthWithoutDiscord`).
+- **Visual check:** recorded under task-14.

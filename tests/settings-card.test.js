@@ -76,3 +76,18 @@ test("parseBindings mirrors backend validation", async () => {
   assert.equal(bad.bindings.length, 1);
   assert.equal(bad.problems.length, 3);
 });
+
+test("gatewaySummary explains the cached bridge state", async () => {
+  const { mod } = await loadBundle();
+  assert.equal(mod.gatewaySummary(null).tone, "warn");
+  assert.equal(mod.gatewaySummary({ state: "unknown" }).tone, "warn");
+  assert.deepEqual(mod.gatewaySummary({ state: "connected", bot_member: true, provisioned: true }), {
+    tone: "ok",
+    text: "Bridge connected; server provisioned.",
+  });
+  assert.match(mod.gatewaySummary({ state: "connected", bot_member: false }).text, /not in this server/);
+  assert.match(mod.gatewaySummary({ state: "fatal", close_code: 4014 }).text, /Message Content intent \(4014\)/);
+  assert.match(mod.gatewaySummary({ state: "fatal", close_code: 4004 }).text, /rejected the bot token \(4004\)/);
+  assert.match(mod.gatewaySummary({ state: "not_configured", config_error: "bot_token is required" }).text, /bot_token is required/);
+  assert.equal(mod.gatewaySummary({ state: "identify_budget_exhausted", detail: "900 identifies" }).tone, "error");
+});
