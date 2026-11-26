@@ -43,7 +43,11 @@ func (b *Bridge) kickAfter(taskID string, d time.Duration) {
 func (b *Bridge) channelManager() *channels.Manager {
 	return &channels.Manager{
 		API: b.api, Config: b.cfg, BotUserID: b.botID(), StartedAt: b.started,
+		CategoryLock: &b.categoryMu, CurrentGuild: b.guild,
 		SaveGuild: b.setGuild, Note: b.postStatus,
+		SaveIntent: func(ctx context.Context, rec store.Channel) error {
+			return b.st.PutChannel(ctx, rec, rec.ChannelID)
+		},
 	}
 }
 
@@ -74,6 +78,16 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	if !ok {
 		return // unbound workspace, or provisioning has not finished
 	}
+	if found && rec.GuildID != "" && rec.GuildID != g.GuildID {
+		if rec, err = b.retire(ctx, rec); err != nil {
+			log.Printf("discord: task %s: retiring channel of a former binding: %v", taskID, err)
+			return
+		}
+	}
+	if task != nil && rec.Status == store.StatusActive && !channels.WantOpen(b.cfg, task) {
+		// Post the final answer and status before the channel closes.
+		rec = b.syncActive(ctx, task, rec)
+	}
 	res, err := b.channelManager().Sync(ctx, channels.Input{
 		Task: task, Rec: rec, Guild: g, ParentIdentifier: b.parentIdentifier(ctx, task), Now: b.now(),
 	})
@@ -85,12 +99,40 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 			log.Printf("discord: saving channel record of task %s: %v", taskID, err)
 			return
 		}
+		if res.Rec.ChannelID != rec.ChannelID && res.Rec.Status == store.StatusActive {
+			// A new channel: prompts posted in the old one are unreachable.
+			b.forgetPrompts(ctx, taskID)
+		}
 	}
 	if res.RetryAfter > 0 {
 		b.kickAfter(taskID, res.RetryAfter)
 	}
 	if task != nil && res.Rec.Status == store.StatusActive {
 		b.syncActive(ctx, task, res.Rec)
+	}
+}
+
+// retire detaches a record from a guild the workspace is no longer bound
+// to: its channel leaves the reverse index (no more traffic either way) and
+// the task gets a fresh channel in the new guild. The outbound cursor is
+// kept, so the history already mirrored is not posted again.
+func (b *Bridge) retire(ctx context.Context, rec store.Channel) (store.Channel, error) {
+	old := rec
+	old.Status = store.StatusDeleted
+	if err := b.st.PutChannel(ctx, old, old.ChannelID); err != nil {
+		return rec, err
+	}
+	b.forgetPrompts(ctx, rec.TaskID)
+	log.Printf("discord: task %s moved from server %s to a new binding; creating a new channel", rec.TaskID, rec.GuildID)
+	return store.Channel{TaskID: rec.TaskID, WorkspaceID: rec.WorkspaceID, OutboundCursor: rec.OutboundCursor}, nil
+}
+
+func (b *Bridge) forgetPrompts(ctx context.Context, taskID string) {
+	if err := b.st.PutPrompts(ctx, taskID, store.Prompts{}); err != nil {
+		log.Printf("discord: task %s: clearing prompts: %v", taskID, err)
+	}
+	if err := b.st.DeleteStepApproval(ctx, taskID); err != nil {
+		log.Printf("discord: task %s: clearing step prompt: %v", taskID, err)
 	}
 }
 
@@ -110,18 +152,25 @@ func (b *Bridge) parentIdentifier(ctx context.Context, task *pluginsdk.Task) str
 
 // onChannelDelete marks a task channel deleted when Discord deletes it; the
 // next reconcile recreates it if the task is still open.
-func (b *Bridge) onChannelDelete(ctx context.Context, ch *discordgo.Channel) {
-	ix, ok, err := b.st.ChannelIndex(ctx, ch.ID)
-	if err != nil || !ok {
-		return
-	}
-	b.sched.Do(ix.TaskID, func(ctx context.Context) {
-		rec, found, err := b.st.Channel(ctx, ix.TaskID)
-		if err != nil || !found || rec.ChannelID != ch.ID || rec.Status == store.StatusDeleted {
+func (b *Bridge) onChannelDelete(_ context.Context, ch *discordgo.Channel) {
+	b.sched.Do("chan:"+ch.ID, func(ctx context.Context) {
+		ix, ok, err := b.st.ChannelIndex(ctx, ch.ID)
+		if err != nil || !ok {
 			return
 		}
-		if err := b.st.PutChannel(ctx, channels.MarkDeleted(rec, b.now()), rec.ChannelID); err != nil {
-			log.Printf("discord: saving deleted channel of task %s: %v", ix.TaskID, err)
-		}
+		b.onTaskAndWait(ix.TaskID, func(ctx context.Context) { b.markGone(ctx, ix.TaskID, ch.ID) })
 	})
+}
+
+// markGone records that Discord no longer has a task's channel.
+func (b *Bridge) markGone(ctx context.Context, taskID, channelID string) bool {
+	rec, found, err := b.st.Channel(ctx, taskID)
+	if err != nil || !found || rec.ChannelID != channelID || rec.Status == store.StatusDeleted {
+		return false
+	}
+	if err := b.st.PutChannel(ctx, channels.MarkDeleted(rec, b.now()), rec.ChannelID); err != nil {
+		log.Printf("discord: saving deleted channel of task %s: %v", taskID, err)
+		return false
+	}
+	return true
 }

@@ -171,13 +171,26 @@ func TestStepApprovalOutcomes(t *testing.T) {
 	f.host.ApproveFn = func(pluginsdk.ExactStepApprovalCommand) (*pluginsdk.CommandResult, pluginsdk.StepApprovalResult, error) {
 		return &pluginsdk.CommandResult{Status: pluginsdk.CommandConflict, Reason: "step_not_awaiting_approval"}, pluginsdk.StepApprovalResult{}, nil
 	}
-	assert.Equal(t, msgNothingAwaiting, f.run(f.button(opUser, prompts.StepButtonPrefix+"s1")))
+	assert.Equal(t, msgNothingAwaiting, f.run(f.button(opUser, prompts.StepButtonID("s1", "review"))))
 
 	f.host.StepFn = func(pluginsdk.ExactStepApprovalQuery) (pluginsdk.StepApproval, error) {
 		return pluginsdk.StepApproval{}, status.Error(codes.Unimplemented, "office approval stage")
 	}
-	got := f.run(f.button(opUser, prompts.StepButtonPrefix+"s1"))
+	got := f.run(f.button(opUser, prompts.StepButtonID("s1", "review")))
 	assert.Equal(t, "This is an Office approval stage; approve it in Kandev: https://kandev.example.com/t/t1", got)
+}
+
+func TestStaleStepButtonApprovesNothing(t *testing.T) {
+	f := newFixture(t)
+	awaitingStep(f) // the session now awaits approval of "review"
+	got := f.run(f.button(opUser, prompts.StepButtonID("s1", "design")))
+	assert.Contains(t, got, "out of date")
+	assert.Empty(t, f.host.Receipts)
+	assert.Empty(t, f.host.Approvals)
+	assert.Contains(t, f.syncs, "t1", "the task is re-synced so the stale prompt is cleared")
+
+	f.run(f.button(opUser, prompts.StepButtonID("s1", "review")))
+	assert.Len(t, f.host.Approvals, 1)
 }
 
 func TestLinkRelaysTheCodeAndNeverEchoesIt(t *testing.T) {
@@ -221,5 +234,5 @@ func TestAutocompleteListsPermissionsAndSteps(t *testing.T) {
 	assert.Equal(t, "Permission: Run tests?", resp.Data.Choices[0].Name)
 	assert.Equal(t, "perm:i1", resp.Data.Choices[0].Value)
 	assert.Equal(t, "Step: Review → Done", resp.Data.Choices[1].Name)
-	assert.Equal(t, "step:s1", resp.Data.Choices[1].Value)
+	assert.Equal(t, "step:s1:review", resp.Data.Choices[1].Value)
 }

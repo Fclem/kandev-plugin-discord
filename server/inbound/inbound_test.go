@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -27,12 +28,13 @@ func idAt(t time.Time, seq int) string {
 }
 
 type fixture struct {
-	api   *discordapi.Fake
-	host  *kandev.Fake
-	h     *Handler
-	rec   store.Channel
-	saved []store.Channel
-	ops   map[string]bool
+	api     *discordapi.Fake
+	host    *kandev.Fake
+	h       *Handler
+	rec     store.Channel
+	saved   []store.Channel
+	ops     map[string]bool
+	authErr error
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -42,8 +44,13 @@ func newFixture(t *testing.T) *fixture {
 	f.rec = store.Channel{TaskID: "t1", ChannelID: ch.ID, Status: store.StatusActive, InboundCursor: ch.ID}
 	f.h = &Handler{
 		API: f.api, Host: f.host, MaxAge: 15 * time.Minute, Now: func() time.Time { return now },
-		Save:       func(_ context.Context, r store.Channel) error { f.saved = append(f.saved, r); return nil },
-		IsOperator: func(_ context.Context, m *discordgo.Message) bool { return f.ops[m.Author.ID] },
+		Save: func(_ context.Context, r store.Channel) error { f.saved = append(f.saved, r); return nil },
+		Authorize: func(_ context.Context, m *discordgo.Message) (*discordgo.Member, bool, error) {
+			if f.authErr != nil {
+				return nil, false, f.authErr
+			}
+			return m.Member, f.ops[m.Author.ID], nil
+		},
 	}
 	return f
 }
@@ -135,6 +142,23 @@ func TestCatchUpDeliversRecentAndRejectsStaleMessages(t *testing.T) {
 	again, err := f.h.CatchUp(context.Background(), f.rec)
 	require.NoError(t, err)
 	assert.Equal(t, rec.InboundCursor, again.InboundCursor)
+	assert.Len(t, f.host.Sent, 1)
+}
+
+func TestUnknownAuthorityKeepsTheMessageForALaterCatchUp(t *testing.T) {
+	f := newFixture(t)
+	m := f.api.AddMessage(f.msg(now.Add(-time.Minute), 1, "op", "deploy"))
+	f.authErr = errors.New("discord unavailable")
+	rec, err := f.h.CatchUp(context.Background(), f.rec)
+	require.Error(t, err)
+	assert.Equal(t, f.rec.InboundCursor, rec.InboundCursor, "cursor does not pass an undecided message")
+	assert.Empty(t, f.host.Sent)
+	assert.Empty(t, f.api.ReactionsOn(m.ID))
+
+	f.authErr = nil
+	rec, err = f.h.CatchUp(context.Background(), rec)
+	require.NoError(t, err)
+	assert.Equal(t, m.ID, rec.InboundCursor)
 	assert.Len(t, f.host.Sent, 1)
 }
 

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
@@ -128,4 +129,47 @@ func TestFakeChannelMessagesAfterCursor(t *testing.T) {
 	assert.Equal(t, []string{c.ID, b.ID}, []string{got[0].ID, got[1].ID}, "newest first like Discord")
 	assert.Equal(t, 0, f.Mutations())
 	assert.Less(t, CompareIDs("999", "1000"), 0)
+}
+
+func TestTransportErrorsNeverCarryTheInteractionToken(t *testing.T) {
+	s := NewSession("secret-token")
+	s.Client = &http.Client{Transport: failingTransport{}}
+	s.MaxRestRetries = 0
+	c := NewClient(s)
+	err := c.InteractionRespond(context.Background(), &discordgo.Interaction{ID: "1", Token: "interaction-secret", AppID: "2"},
+		&discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "interaction-secret")
+	assert.Contains(t, err.Error(), "discord.com")
+	assert.ErrorIs(t, err, errNetworkDown)
+}
+
+var errNetworkDown = errors.New("network down")
+
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, errNetworkDown }
+
+func TestInteractionsSkipTheSharedBudget(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	// Exhaust the budget for the next ~10 s of bot calls.
+	c.limiter.mu.Lock()
+	c.limiter.next = time.Now().Add(10 * time.Second)
+	c.limiter.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := c.InteractionRespond(ctx, &discordgo.Interaction{ID: "1", Token: "t", AppID: "2"},
+		&discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredChannelMessageWithSource})
+	require.NoError(t, err, "the 3-second ACK never waits behind bot traffic")
+}
+
+func TestHaltNotifiesOnceAndStopsQueuedCalls(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusUnauthorized) })
+	var halts atomic.Int32
+	c.OnHalt(func() { halts.Add(1) })
+	_, err := c.CurrentUser(context.Background())
+	require.ErrorIs(t, err, ErrHalted)
+	_, err = c.CurrentUser(context.Background())
+	require.ErrorIs(t, err, ErrHalted)
+	assert.Equal(t, int32(1), halts.Load())
 }

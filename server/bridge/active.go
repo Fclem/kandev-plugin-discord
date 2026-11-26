@@ -8,6 +8,8 @@ import (
 
 	"github.com/kdlbs/kandev/pluginsdk"
 
+	"kandev-plugin-discord/server/channels"
+	"kandev-plugin-discord/server/discordapi"
 	"kandev-plugin-discord/server/outbound"
 	"kandev-plugin-discord/server/prompts"
 	"kandev-plugin-discord/server/store"
@@ -22,13 +24,14 @@ type stepCache struct {
 }
 
 // syncActive mirrors an active channel: messages, status lines, the card,
-// and pending prompts. It schedules the next live update while a session
-// runs.
-func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store.Channel) {
+// and pending prompts, and returns the saved record. It schedules the next
+// live update while a session runs. A channel Discord no longer has is
+// marked deleted and the task re-synced, which recreates it.
+func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store.Channel) store.Channel {
 	sessions, err := b.host.ListSessions(ctx, task.ID)
 	if err != nil {
 		log.Printf("discord: task %s: listing sessions: %v", task.ID, err)
-		return
+		return rec
 	}
 	b.rememberSessions(task.ID, sessions)
 	pending := b.pendingCount(ctx, task.ID)
@@ -52,18 +55,23 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 			log.Printf("discord: task %s: saving channel record: %v", task.ID, err)
 		}
 	}
+	if discordapi.HasCode(err, discordapi.CodeUnknownChannel) {
+		if b.markGone(ctx, task.ID, next.ChannelID) {
+			b.Kick(task.ID)
+		}
+		return channels.MarkDeleted(next, b.now())
+	}
 	if retry > 0 {
 		b.kickAfter(task.ID, retry)
 	}
-	if next.Status == store.StatusActive {
-		poster := &prompts.Poster{API: b.api, Host: b.host, Store: b.st, TaskURL: b.cfg.TaskURL, Now: b.now}
-		if err := poster.Sync(ctx, task, next, sessions); err != nil {
-			log.Printf("discord: task %s: prompts: %v", task.ID, err)
-		}
+	poster := &prompts.Poster{API: b.api, Host: b.host, Store: b.st, TaskURL: b.cfg.TaskURL, Now: b.now}
+	if err := poster.Sync(ctx, task, next, sessions); err != nil {
+		log.Printf("discord: task %s: prompts: %v", task.ID, err)
 	}
 	if b.cfg.LiveUpdateInterval > 0 && anyRunning(sessions) {
 		b.kickAfter(task.ID, b.cfg.LiveUpdateInterval)
 	}
+	return next
 }
 
 func anyRunning(sessions []pluginsdk.Session) bool {

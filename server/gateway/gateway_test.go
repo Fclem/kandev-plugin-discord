@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,6 +125,22 @@ func TestReconnectsAfterDisconnect(t *testing.T) {
 	final := <-done
 	assert.Equal(t, StateStopped, final.Name)
 	assert.Equal(t, 2, conn.opens)
+	assert.Equal(t, 1, conn.closes)
+}
+
+func TestRestHaltWhileConnectedClosesTheSocket(t *testing.T) {
+	conn := &fakeConn{opened: make(chan struct{}, 2)}
+	s, _ := newSupervisor(conn, budget())
+	var halted atomic.Bool
+	s.Halted = halted.Load
+	done := make(chan State)
+	go func() { done <- s.Run(context.Background()) }()
+	<-conn.opened
+	halted.Store(true)
+	s.Halt()
+	final := <-done
+	assert.Equal(t, StateHalted, final.Name)
+	assert.Equal(t, 1, conn.opens)
 	assert.Equal(t, 1, conn.closes)
 }
 

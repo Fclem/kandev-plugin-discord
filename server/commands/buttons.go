@@ -28,8 +28,8 @@ func (c *call) button(ctx context.Context) {
 		c.respondPermission(ctx, taskID, interactionID, func([]pluginsdk.InteractionOption) int { return index })
 		return
 	}
-	if sessionID, ok := strings.CutPrefix(customID, prompts.StepButtonPrefix); ok {
-		c.approveStep(ctx, taskID, sessionID)
+	if sessionID, fromStepID, ok := prompts.ParseStepButton(customID); ok {
+		c.approveStep(ctx, taskID, sessionID, fromStepID)
 		return
 	}
 	c.reply(ctx, "Unknown button.")
@@ -90,6 +90,6 @@ func (c *call) addStepChoices(ctx context.Context, taskID string, add func(name,
 		if a.ToStepName != "" {
 			name += " → " + a.ToStepName
 		}
-		add(name, requestStep+s.ID)
+		add(name, requestStep+s.ID+":"+a.FromStepID)
 	}
 }

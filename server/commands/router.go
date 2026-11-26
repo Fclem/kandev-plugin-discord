@@ -111,7 +111,7 @@ func (c *call) command(ctx context.Context) {
 // taskOfChannel maps the interaction's channel to an active task channel.
 func (c *call) taskOfChannel(ctx context.Context) (string, bool) {
 	ix, ok, err := c.Store.ChannelIndex(ctx, c.i.ChannelID)
-	if err != nil || !ok || ix.WorkspaceID != c.binding.WorkspaceID {
+	if err != nil || !ok || ix.WorkspaceID != c.binding.WorkspaceID || ix.GuildID != c.i.GuildID {
 		return "", false
 	}
 	return ix.TaskID, true

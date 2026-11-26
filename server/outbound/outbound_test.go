@@ -55,6 +55,23 @@ func TestChunkHardSplitsLongLinesOnRuneBoundaries(t *testing.T) {
 	}
 }
 
+func TestChunkTerminatesOnHugeFenceOpenersAndLines(t *testing.T) {
+	text := "```" + strings.Repeat("x", 5000) + "\n" + strings.Repeat("code line\n", 1000) + "```"
+	done := make(chan []string, 1)
+	go func() { done <- Chunk(text, 2000) }()
+	select {
+	case chunks := <-done:
+		require.NotEmpty(t, chunks)
+		for _, c := range chunks {
+			assert.LessOrEqual(t, len(c), 2000)
+		}
+		assert.LessOrEqual(t, len(chunks), MaxChunks+1, "stops once truncation is certain")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Chunk did not terminate")
+	}
+	assert.LessOrEqual(t, len(Chunk(strings.Repeat("y", 10_000_000), 2000)), MaxChunks+1)
+}
+
 func TestLimitCapsAtFiveChunks(t *testing.T) {
 	chunks, truncated := Limit(Chunk(strings.Repeat(strings.Repeat("x", 1999)+"\n", 7), 2000))
 	assert.Len(t, chunks, MaxChunks)
@@ -186,6 +203,44 @@ func TestMirrorTruncatesLongMessagesWithALink(t *testing.T) {
 	texts := f.texts()
 	require.Len(t, texts, MaxChunks+1)
 	assert.Equal(t, "… truncated — open in Kandev: https://k/t/t1", texts[MaxChunks])
+}
+
+func TestFailedPartResumesWithoutRepeatingDeliveredParts(t *testing.T) {
+	f := newMirror(t)
+	var saved store.Channel
+	f.m.Save = func(_ context.Context, r store.Channel) error { saved = r; return nil }
+	body := strings.Repeat("a", 1990) + "\n" + strings.Repeat("b", 1990) + "\n" + strings.Repeat("c", 10)
+	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: body, CreatedAt: "2026-11-25T10:01:00Z"})
+	f.api.FailNext("MessageSend", nil)
+	f.api.FailNext("MessageSend", &discordapi.Error{Status: 500})
+	_, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	assert.Equal(t, 1, saved.OutboundCursor.PartsSent)
+	assert.Equal(t, "m1", saved.OutboundCursor.PartialID)
+
+	f.rec = saved
+	f.sync(t, nil, time.Now())
+	texts := f.texts()
+	require.Len(t, texts, 3, "each part posted exactly once")
+	assert.True(t, strings.HasPrefix(texts[0], "aaa"))
+	assert.True(t, strings.HasPrefix(texts[1], "bbb"))
+	assert.Equal(t, strings.Repeat("c", 10), texts[2])
+	assert.Empty(t, f.rec.OutboundCursor.PartialID)
+}
+
+func TestFailedPinIsRetriedWithoutRepostingTheCard(t *testing.T) {
+	f := newMirror(t)
+	f.api.FailNext("MessagePin", &discordapi.Error{Status: 500})
+	rec, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	require.NotEmpty(t, rec.CardMessageID)
+	assert.False(t, rec.CardPinned)
+	card := rec.CardMessageID
+	rec, _, err = f.m.Sync(context.Background(), Input{Task: f.task, Rec: rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.NoError(t, err)
+	assert.Equal(t, card, rec.CardMessageID, "card not reposted")
+	assert.True(t, rec.CardPinned)
+	assert.True(t, f.api.Pins[card])
 }
 
 func TestCardIsPinnedOnceAndEditsAreDebounced(t *testing.T) {

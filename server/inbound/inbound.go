@@ -38,8 +38,11 @@ type Handler struct {
 	Now  func() time.Time
 	// MaxAge bounds catch-up delivery of messages sent while offline.
 	MaxAge time.Duration
-	// IsOperator decides authority for a message author.
-	IsOperator func(ctx context.Context, m *discordgo.Message) bool
+	// Authorize returns the author's member record (with roles) and whether
+	// they are an operator. An error means authority is unknown (for
+	// example Discord was unavailable): the message stays undelivered and
+	// the cursor does not move, so a later catch-up retries it.
+	Authorize func(ctx context.Context, m *discordgo.Message) (*discordgo.Member, bool, error)
 }
 
 // Deliverable reports whether a gateway message is a human chat message the
@@ -66,7 +69,11 @@ func (h *Handler) Handle(ctx context.Context, rec store.Channel, m *discordgo.Me
 		h.reply(ctx, m, ReactFailed, "Delivery of this message is uncertain because the bridge restarted; check the task in Kandev before resending.")
 		return h.finish(ctx, rec, m.ID)
 	}
-	if !h.IsOperator(ctx, m) {
+	member, operator, err := h.Authorize(ctx, m)
+	if err != nil {
+		return rec, fmt.Errorf("checking the author's roles: %w", err)
+	}
+	if !operator {
 		h.react(ctx, m, ReactDenied)
 		return h.finish(ctx, rec, m.ID)
 	}
@@ -74,7 +81,7 @@ func (h *Handler) Handle(ctx context.Context, rec store.Channel, m *discordgo.Me
 	if err := h.Save(ctx, rec); err != nil {
 		return rec, fmt.Errorf("saving in-flight marker: %w", err)
 	}
-	text := authz.DisplayName(m.Member, m.Author) + " (Discord): " + strings.TrimSpace(m.Content)
+	text := authz.DisplayName(member, m.Author) + " (Discord): " + strings.TrimSpace(m.Content)
 	dispatch, err := h.Host.SendMessage(ctx, rec.TaskID, text)
 	switch {
 	case err != nil:

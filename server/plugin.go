@@ -80,11 +80,14 @@ func (p *discordPlugin) runBridge(h pluginsdk.Host) {
 	}
 	sess := discordapi.NewSession(cfg.BotToken)
 	api := discordapi.NewClient(sess)
-	b := bridge.New(bridge.Deps{Config: cfg, API: api, Host: kandev.SDK{H: h}, Store: st, Halted: api.Halted})
+	b := bridge.New(bridge.Deps{
+		Context: ctx, Config: cfg, API: api, Host: kandev.SDK{H: h}, Store: st,
+		Halted: api.Halted, HaltNotifier: api,
+	})
 	p.mu.Lock()
 	p.bridge = b
 	p.mu.Unlock()
-	final := b.Run(ctx, sess)
+	final := b.Run(sess)
 	log.Printf("discord: gateway stopped: %s", final.Name)
 }
 

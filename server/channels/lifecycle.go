@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -31,8 +32,17 @@ type Manager struct {
 	// StartedAt is the process start: `failed` records are retried once per
 	// process (after a restart or a config change, which restarts).
 	StartedAt time.Time
+	// CategoryLock serializes category selection, rollover, and the channel
+	// placement that counts against it, across every task of the process.
+	CategoryLock *sync.Mutex
+	// CurrentGuild returns the latest guild record (after other tasks'
+	// rollovers); nil means use Input.Guild.
+	CurrentGuild func(workspaceID string) (store.Guild, bool)
 	// SaveGuild persists a guild record after category rollover.
 	SaveGuild func(ctx context.Context, workspaceID string, g store.Guild) error
+	// SaveIntent persists the record before a channel is created, so a lost
+	// write after creation is recovered by adopting the channel on retry.
+	SaveIntent func(ctx context.Context, rec store.Channel) error
 	// Note posts one line to the guild's #kandev-status.
 	Note func(ctx context.Context, g store.Guild, text string)
 }
@@ -84,7 +94,13 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		if !want {
 			return m.close(ctx, in)
 		}
-		return m.rename(ctx, in)
+		res, err := m.converge(ctx, in, false)
+		if err != nil || res.Rec.Status != store.StatusActive {
+			return res, err
+		}
+		next, err := m.rename(ctx, Input{Task: in.Task, Rec: res.Rec, Guild: in.Guild, ParentIdentifier: in.ParentIdentifier, Now: in.Now})
+		next.Changed = next.Changed || res.Changed
+		return next, err
 	case store.StatusArchived:
 		if want {
 			return m.reopen(ctx, in)
@@ -92,9 +108,14 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		if !rec.DeleteAfter.IsZero() && !in.Now.Before(rec.DeleteAfter) {
 			return m.remove(ctx, in, "retention period ended")
 		}
-		if !rec.DeleteAfter.IsZero() {
-			return Result{Rec: rec, RetryAfter: rec.DeleteAfter.Sub(in.Now)}, nil
+		res, err := m.converge(ctx, in, true)
+		if err != nil || res.Rec.Status != store.StatusArchived {
+			return res, err
 		}
+		if !rec.DeleteAfter.IsZero() {
+			res.RetryAfter = rec.DeleteAfter.Sub(in.Now)
+		}
+		return res, nil
 	}
 	return Result{Rec: rec}, nil
 }
@@ -109,8 +130,68 @@ func MarkDeleted(rec store.Channel, now time.Time) store.Channel {
 
 func (m *Manager) roles(g store.Guild) provision.Roles { return provision.RolesOf(g, m.BotUserID) }
 
+// RolesKey identifies the role set a channel's overwrites were written for.
+func RolesKey(g store.Guild) string { return g.OperatorRoleID + "/" + g.ViewerRoleID }
+
 func (m *Manager) topic(in Input) string {
 	return Topic(in.Task, in.ParentIdentifier, m.Config.TaskURL(in.Task.ID))
+}
+
+// converge rewrites a channel's overwrites after the operator or viewer
+// role changed, so a former operator role loses access.
+func (m *Manager) converge(ctx context.Context, in Input, readOnly bool) (Result, error) {
+	rec := in.Rec
+	key := RolesKey(in.Guild)
+	if rec.RolesKey == key {
+		return Result{Rec: rec}, nil
+	}
+	overwrites := provision.TaskOverwrites(m.roles(in.Guild))
+	if readOnly {
+		overwrites = provision.ReadOnlyOverwrites(m.roles(in.Guild))
+	}
+	if _, err := m.API.ChannelEdit(ctx, rec.ChannelID, &discordgo.ChannelEdit{PermissionOverwrites: overwrites}); err != nil {
+		if discordapi.IsGone(err) {
+			return Result{Rec: MarkDeleted(rec, in.Now), Changed: true}, nil
+		}
+		return Result{Rec: rec}, fmt.Errorf("updating channel permissions: %w", err)
+	}
+	rec.RolesKey, rec.UpdatedAt = key, in.Now
+	return Result{Rec: rec, Changed: true}, nil
+}
+
+// placement holds the category lock while a channel is created or moved.
+type placement struct {
+	m        *Manager
+	guild    store.Guild
+	channels []*discordgo.Channel
+}
+
+// place locks category selection, refreshes the guild record, lists the
+// guild's channels, and runs fn. fn's channel creation or move happens
+// under the lock, so concurrent tasks see each other's placements.
+func (m *Manager) place(ctx context.Context, in Input, fn func(p *placement) error) error {
+	if m.CategoryLock != nil {
+		m.CategoryLock.Lock()
+		defer m.CategoryLock.Unlock()
+	}
+	g := in.Guild
+	if m.CurrentGuild != nil {
+		if cur, ok := m.CurrentGuild(workspaceOf(in)); ok && cur.GuildID == g.GuildID {
+			g = cur
+		}
+	}
+	channels, err := m.API.GuildChannels(ctx, g.GuildID)
+	if err != nil {
+		return fmt.Errorf("listing channels: %w", err)
+	}
+	return fn(&placement{m: m, guild: g, channels: channels})
+}
+
+func workspaceOf(in Input) string {
+	if in.Task != nil {
+		return in.Task.WorkspaceID
+	}
+	return in.Rec.WorkspaceID
 }
 
 func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
@@ -118,26 +199,48 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 	rec := prev
 	rec.TaskID, rec.WorkspaceID, rec.GuildID = in.Task.ID, in.Task.WorkspaceID, in.Guild.GuildID
 	rec.UpdatedAt = in.Now
-	parent, err := m.categoryWithRoom(ctx, in, false)
-	if err == nil {
-		var ch *discordgo.Channel
-		ch, err = m.API.GuildChannelCreate(ctx, in.Guild.GuildID, discordgo.GuildChannelCreateData{
-			Name: Name(in.Task), Type: discordgo.ChannelTypeGuildText, Topic: m.topic(in),
-			ParentID: parent, PermissionOverwrites: provision.TaskOverwrites(m.roles(in.Guild)),
-		})
-		if err == nil {
-			rec.ChannelID, rec.Status, rec.LastError = ch.ID, store.StatusActive, ""
-			rec.SyncedTitle, rec.SyncedTopic, rec.LastRenamedAt = in.Task.Title, m.topic(in), time.Time{}
-			rec.InboundCursor, rec.InboundInflight = ch.ID, ""
-			rec.CardMessageID, rec.CardHash, rec.ClosedAt, rec.DeleteAfter = "", "", time.Time{}, time.Time{}
-			if prev.OutboundCursor.CreatedAt == "" {
-				rec.OutboundCursor = store.Cursor{CreatedAt: initialCursor(in.Task, in.Now)}
-			}
-			if prev.Status == store.StatusDeleted && prev.ChannelID != "" && m.Note != nil {
-				m.Note(ctx, in.Guild, fmt.Sprintf("Recreated the channel of %s (#%s) after it was deleted in Discord.", label(in.Task), ch.Name))
-			}
-			return Result{Rec: rec, Changed: true}, nil
+	name := Name(in.Task)
+	if prev.Status != store.StatusCreating && m.SaveIntent != nil {
+		intent := rec
+		intent.Status = store.StatusCreating
+		if err := m.SaveIntent(ctx, intent); err != nil {
+			return Result{Rec: prev}, fmt.Errorf("saving creation intent: %w", err)
 		}
+	}
+	var ch *discordgo.Channel
+	err := m.place(ctx, in, func(p *placement) error {
+		if prev.Status == store.StatusCreating {
+			// A previous attempt may have created the channel and lost the
+			// record write: adopt it instead of creating a duplicate.
+			ch = p.adoptable(name)
+			if ch != nil {
+				return nil
+			}
+		}
+		parent, err := p.categoryWithRoom(ctx, workspaceOf(in), false)
+		if err != nil {
+			return err
+		}
+		ch, err = m.API.GuildChannelCreate(ctx, p.guild.GuildID, discordgo.GuildChannelCreateData{
+			Name: name, Type: discordgo.ChannelTypeGuildText, Topic: m.topic(in),
+			ParentID: parent, PermissionOverwrites: provision.TaskOverwrites(m.roles(p.guild)),
+		})
+		return err
+	})
+	if err == nil {
+		rec.ChannelID, rec.Status, rec.LastError = ch.ID, store.StatusActive, ""
+		rec.SyncedTitle, rec.SyncedTopic, rec.LastRenamedAt = in.Task.Title, m.topic(in), time.Time{}
+		rec.RolesKey = RolesKey(in.Guild)
+		rec.InboundCursor, rec.InboundInflight = ch.ID, ""
+		rec.CardMessageID, rec.CardHash, rec.CardPinned = "", "", false
+		rec.ClosedAt, rec.DeleteAfter = time.Time{}, time.Time{}
+		if prev.OutboundCursor.CreatedAt == "" {
+			rec.OutboundCursor = store.Cursor{CreatedAt: initialCursor(in.Task, in.Now)}
+		}
+		if prev.Status == store.StatusDeleted && prev.ChannelID != "" && m.Note != nil {
+			m.Note(ctx, in.Guild, fmt.Sprintf("Recreated the channel of %s (#%s) after it was deleted in Discord.", label(in.Task), ch.Name))
+		}
+		return Result{Rec: rec, Changed: true}, nil
 	}
 	switch {
 	case discordapi.HasCode(err, discordapi.CodeMaxGuildChannels):
@@ -151,6 +254,22 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		return Result{Rec: rec, Changed: true}, nil
 	}
 	return Result{Rec: prev}, fmt.Errorf("creating channel: %w", err)
+}
+
+// adoptable finds a text channel with the task's channel name in one of the
+// plugin's task categories.
+func (p *placement) adoptable(name string) *discordgo.Channel {
+	for _, c := range p.channels {
+		if c.Type != discordgo.ChannelTypeGuildText || c.Name != name {
+			continue
+		}
+		for _, cat := range p.guild.TaskCategoryIDs {
+			if c.ParentID == cat {
+				return c
+			}
+		}
+	}
+	return nil
 }
 
 func initialCursor(task *pluginsdk.Task, now time.Time) string {
@@ -189,41 +308,47 @@ func (m *Manager) close(ctx context.Context, in Input) (Result, error) {
 	if m.Config.ClosedChannelAction == config.ClosedDelete {
 		return m.remove(ctx, in, "task closed")
 	}
-	rec := in.Rec
-	parent, err := m.categoryWithRoom(ctx, in, true)
-	if err != nil {
-		return Result{Rec: rec}, err
-	}
-	if _, err := m.API.ChannelEdit(ctx, rec.ChannelID, &discordgo.ChannelEdit{
-		ParentID: parent, PermissionOverwrites: provision.ReadOnlyOverwrites(m.roles(in.Guild)),
-	}); err != nil {
-		if discordapi.IsGone(err) {
-			return Result{Rec: MarkDeleted(rec, in.Now), Changed: true}, nil
-		}
-		return Result{Rec: rec}, fmt.Errorf("archiving channel: %w", err)
-	}
-	rec.Status, rec.ClosedAt, rec.UpdatedAt, rec.DeleteAfter = store.StatusArchived, in.Now, in.Now, time.Time{}
-	if days := m.Config.ArchiveRetentionDays; days > 0 {
-		rec.DeleteAfter = in.Now.Add(time.Duration(days) * 24 * time.Hour)
-	}
-	return Result{Rec: rec, Changed: true}, nil
+	return m.move(ctx, in, true)
 }
 
 func (m *Manager) reopen(ctx context.Context, in Input) (Result, error) {
+	return m.move(ctx, in, false)
+}
+
+// move archives (read-only, archive category) or reopens a channel.
+func (m *Manager) move(ctx context.Context, in Input, archive bool) (Result, error) {
 	rec := in.Rec
-	parent, err := m.categoryWithRoom(ctx, in, false)
+	err := m.place(ctx, in, func(p *placement) error {
+		parent, err := p.categoryWithRoom(ctx, workspaceOf(in), archive)
+		if err != nil {
+			return err
+		}
+		overwrites := provision.TaskOverwrites(m.roles(p.guild))
+		if archive {
+			overwrites = provision.ReadOnlyOverwrites(m.roles(p.guild))
+		}
+		_, err = m.API.ChannelEdit(ctx, rec.ChannelID, &discordgo.ChannelEdit{ParentID: parent, PermissionOverwrites: overwrites})
+		return err
+	})
 	if err != nil {
-		return Result{Rec: rec}, err
-	}
-	if _, err := m.API.ChannelEdit(ctx, rec.ChannelID, &discordgo.ChannelEdit{
-		ParentID: parent, PermissionOverwrites: provision.TaskOverwrites(m.roles(in.Guild)),
-	}); err != nil {
 		if discordapi.IsGone(err) {
 			return Result{Rec: MarkDeleted(rec, in.Now), Changed: true}, nil
 		}
-		return Result{Rec: rec}, fmt.Errorf("reopening channel: %w", err)
+		verb := "reopening"
+		if archive {
+			verb = "archiving"
+		}
+		return Result{Rec: rec}, fmt.Errorf("%s channel: %w", verb, err)
 	}
-	rec.Status, rec.ClosedAt, rec.DeleteAfter, rec.UpdatedAt = store.StatusActive, time.Time{}, time.Time{}, in.Now
+	rec.RolesKey, rec.UpdatedAt = RolesKey(in.Guild), in.Now
+	if !archive {
+		rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusActive, time.Time{}, time.Time{}
+		return Result{Rec: rec, Changed: true}, nil
+	}
+	rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusArchived, in.Now, time.Time{}
+	if days := m.Config.ArchiveRetentionDays; days > 0 {
+		rec.DeleteAfter = in.Now.Add(time.Duration(days) * 24 * time.Hour)
+	}
 	return Result{Rec: rec, Changed: true}, nil
 }
 
@@ -238,18 +363,15 @@ func (m *Manager) remove(ctx context.Context, in Input, why string) (Result, err
 
 // categoryWithRoom returns a task (or archive) category with fewer than 50
 // channels, creating the next one ("Kandev Tasks 2", …) when all are full.
-func (m *Manager) categoryWithRoom(ctx context.Context, in Input, archive bool) (string, error) {
-	g := in.Guild
+// The caller holds the category lock.
+func (p *placement) categoryWithRoom(ctx context.Context, workspaceID string, archive bool) (string, error) {
+	m, g := p.m, p.guild
 	ids, base, overwrites := g.TaskCategoryIDs, provision.TaskCategoryName, provision.TaskOverwrites(m.roles(g))
 	if archive {
 		ids, base, overwrites = g.ArchiveCategoryIDs, provision.ArchiveCategoryName, provision.ReadOnlyOverwrites(m.roles(g))
 	}
-	channels, err := m.API.GuildChannels(ctx, g.GuildID)
-	if err != nil {
-		return "", fmt.Errorf("listing channels: %w", err)
-	}
 	counts := map[string]int{}
-	for _, c := range channels {
+	for _, c := range p.channels {
 		counts[c.ParentID]++
 	}
 	for _, id := range ids {
@@ -266,11 +388,8 @@ func (m *Manager) categoryWithRoom(ctx context.Context, in Input, archive bool) 
 	} else {
 		g.TaskCategoryIDs = append(append([]string(nil), ids...), ch.ID)
 	}
+	p.guild = g
 	if m.SaveGuild != nil {
-		workspaceID := in.Rec.WorkspaceID
-		if in.Task != nil {
-			workspaceID = in.Task.WorkspaceID
-		}
 		if err := m.SaveGuild(ctx, workspaceID, g); err != nil {
 			return "", err
 		}

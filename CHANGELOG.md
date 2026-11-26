@@ -42,3 +42,19 @@
 - Builds against the unreleased pluginsdk pseudo-version
   `v0.4.1-0.20261123163015-83cecc587a88`; `make sdk-check` blocks release until
   pluginsdk and `@kdlbs/plugin-sdk` 0.5.0 and a Kandev release ship.
+
+### Fixed (adversarial review round 1)
+
+- Rebinding a workspace to another server moves its tasks to new channels;
+  the old server receives nothing more.
+- Changing the operator role takes access away from the former role.
+- A stale step-approval button can no longer approve a later step.
+- Discord messages are delivered in order, after any missed ones.
+- Recovery: provisioning before READY, channels deleted while offline,
+  lost Host writes during channel creation, transient role-lookup errors,
+  partly posted long messages, and failed card pins.
+- Gateway: fatal close codes after READY stop the bridge; every IDENTIFY
+  counts against the budget; a REST 401 stops the gateway at once.
+- Interaction acknowledgements never wait behind bot traffic, and error
+  messages never contain interaction tokens.
+- A message with a very long code-fence opener can no longer hang a task.

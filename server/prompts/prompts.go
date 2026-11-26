@@ -26,7 +26,7 @@ import (
 // Button custom IDs.
 const (
 	PermissionButtonPrefix = "kd:perm:" // kd:perm:<interaction id>:<option index>
-	StepButtonPrefix       = "kd:step:" // kd:step:<session id>
+	StepButtonPrefix       = "kd:step:" // kd:step:<session id>:<from step id>
 )
 
 // Discord component limits.
@@ -63,6 +63,22 @@ func ParsePermissionButton(customID string) (interactionID string, option int, o
 	}
 	n, err := strconv.Atoi(rest[i+1:])
 	return rest[:i], n, err == nil
+}
+
+// StepButtonID binds an Approve button to the step it was posted for, so a
+// stale prompt can never approve a later step of the same session.
+func StepButtonID(sessionID, fromStepID string) string {
+	return StepButtonPrefix + sessionID + ":" + fromStepID
+}
+
+// ParseStepButton splits a step button custom ID.
+func ParseStepButton(customID string) (sessionID, fromStepID string, ok bool) {
+	rest, ok := strings.CutPrefix(customID, StepButtonPrefix)
+	if !ok {
+		return "", "", false
+	}
+	sessionID, fromStepID, ok = strings.Cut(rest, ":")
+	return sessionID, fromStepID, ok && sessionID != "" && fromStepID != ""
 }
 
 // Sync posts prompts for pending interactions without one, resolves prompts
@@ -282,7 +298,7 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 	msg, err := p.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{
 		Content: text,
 		Components: rows([]discordgo.MessageComponent{discordgo.Button{
-			Label: "Approve", Style: discordgo.SuccessButton, CustomID: StepButtonPrefix + awaiting.SessionID,
+			Label: "Approve", Style: discordgo.SuccessButton, CustomID: StepButtonID(awaiting.SessionID, awaiting.FromStepID),
 		}}),
 	})
 	if err != nil {

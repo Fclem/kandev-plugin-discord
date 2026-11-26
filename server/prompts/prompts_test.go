@@ -137,7 +137,7 @@ func TestStepApprovalPromptFollowsGetStepApproval(t *testing.T) {
 	sent := f.api.SentMessages(f.rec.ChannelID)
 	require.Len(t, sent, 1)
 	assert.Equal(t, "⏸️ Step **Review** awaits approval → **Done**. Approve to move on, or post a message to request changes.", sent[0].Content)
-	assert.Equal(t, StepButtonPrefix+"s1", buttons(sent[0])[0].CustomID)
+	assert.Equal(t, StepButtonID("s1", "review"), buttons(sent[0])[0].CustomID)
 
 	awaiting = false
 	f.sync(t, idle)

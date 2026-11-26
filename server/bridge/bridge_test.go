@@ -46,7 +46,6 @@ func newHarness(t *testing.T, mutate ...func(*config.Config)) *harness {
 	h := &harness{api: discordapi.NewFake(), host: kandev.NewFake(), mem: store.NewMemoryHost(), clock: &now}
 	h.st = store.New(h.mem)
 	h.b = New(Deps{Config: cfg, API: h.api, Host: h.host, Store: h.st, Now: func() time.Time { return *h.clock }})
-	h.b.bind(context.Background())
 	return h
 }
 

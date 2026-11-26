@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -80,6 +81,8 @@ type Supervisor struct {
 
 	once         sync.Once
 	disconnected chan struct{}
+	lastClose    atomic.Int64
+	runCtx       atomic.Pointer[context.Context]
 }
 
 func (s *Supervisor) init() {
@@ -119,24 +122,52 @@ func (s *Supervisor) Disconnected() {
 	}
 }
 
-// Identified records one successful IDENTIFY (discordgo Ready event).
-func (s *Supervisor) Identified(ctx context.Context) {
+// Halt wakes a connected supervisor after a REST 401 so it closes the
+// socket and stops instead of waiting for Discord to drop it.
+func (s *Supervisor) Halt() { s.Disconnected() }
+
+// ObserveClose records a websocket close code seen anywhere in the
+// connection's life (the handshake or the read loop).
+func (s *Supervisor) ObserveClose(code int) {
 	s.init()
+	s.lastClose.Store(int64(code))
+}
+
+// identifySent charges one IDENTIFY to the budget. discordgo sends it from
+// Open and, on an invalid session (op 9), from its read loop.
+func (s *Supervisor) identifySent() {
+	s.init()
+	ctx := context.Background()
+	if p := s.runCtx.Load(); p != nil {
+		ctx = context.WithoutCancel(*p)
+	}
 	if err := s.Budget.Record(ctx, s.Now()); err != nil {
-		s.Report(State{Name: StateConnected, Reason: "identify counter not saved: " + err.Error()})
+		s.Report(State{Name: StateConnecting, Reason: "identify counter not saved: " + err.Error()})
 	}
 }
+
+// fatalClose returns the recorded fatal close code, clearing the record.
+func (s *Supervisor) fatalClose() int {
+	code := int(s.lastClose.Swap(0))
+	if fatalReasons[code] == "" {
+		return 0
+	}
+	return code
+}
+
+const haltReason = "Discord rejected the bot token (HTTP 401): reset the token and save the settings"
 
 // Run blocks until ctx ends or a fatal condition stops the gateway.
 func (s *Supervisor) Run(ctx context.Context) State {
 	s.init()
+	s.runCtx.Store(&ctx)
 	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return s.stop(StateStopped, 0, "")
 		}
 		if s.Halted() {
-			return s.stop(StateHalted, 0, "Discord rejected the bot token (HTTP 401): reset the token and save the settings")
+			return s.stop(StateHalted, 0, haltReason)
 		}
 		count, err := s.Budget.Count(ctx, s.Now())
 		if err != nil {
@@ -152,9 +183,14 @@ func (s *Supervisor) Run(ctx context.Context) State {
 			continue
 		}
 		s.drainDisconnect()
+		s.lastClose.Store(0)
 		s.Report(State{Name: StateConnecting, Identifies24h: count})
 		if err := s.Conn.Open(); err != nil {
-			if code := closeCode(err); fatalReasons[code] != "" {
+			code := closeCode(err)
+			if c := s.fatalClose(); c != 0 {
+				code = c
+			}
+			if fatalReasons[code] != "" {
 				_ = s.Conn.Close()
 				return s.stop(StateFatal, code, fatalReasons[code])
 			}
@@ -170,6 +206,14 @@ func (s *Supervisor) Run(ctx context.Context) State {
 			_ = s.Conn.Close()
 			return s.stop(StateStopped, 0, "")
 		case <-s.disconnected:
+			if s.Halted() {
+				_ = s.Conn.Close()
+				return s.stop(StateHalted, 0, haltReason)
+			}
+			if code := s.fatalClose(); code != 0 {
+				_ = s.Conn.Close()
+				return s.stop(StateFatal, code, fatalReasons[code])
+			}
 			s.Report(State{Name: StateReconnecting, Reason: "gateway connection closed"})
 			s.sleep(ctx, s.backoff(0))
 		}

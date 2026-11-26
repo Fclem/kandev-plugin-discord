@@ -252,6 +252,19 @@ Wave 7:
   on a disposable Kandev from `main`. Live Discord scenarios are blocked:
   this host cannot reach Discord and no test bot was provided.
 - `make sdk-check` fails by design until SDK 0.5.0 ships.
+- Adversarial review round 1 (20 findings) fixed: rebinding retires old
+  channels; operator-role changes converge overwrites; step buttons bind
+  the displayed step; message intake is ordered per channel with catch-up
+  first; provisioning waits for the bot identity and is retried; channels
+  deleted offline (or answering Unknown Channel) are recreated with their
+  prompts; the chunker always terminates; post-READY fatal close codes and
+  every IDENTIFY (op 9 included) are observed through discordgo's logger
+  (loopback-gateway tests); a REST 401 wakes the supervisor; interaction
+  callbacks skip the shared budget; the scheduler is created once; category
+  rollover is serialized; channel creation persists an intent and adopts on
+  retry; unknown authority does not advance the inbound cursor; terminal
+  tasks flush before closing; message parts checkpoint; transport errors
+  are URL-redacted; failed pins retry.
 
 ## Risks
 

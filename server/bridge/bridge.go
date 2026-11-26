@@ -5,6 +5,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -22,23 +23,28 @@ import (
 
 // Deps are the bridge's collaborators.
 type Deps struct {
-	Config config.Config
-	API    discordapi.API
-	Host   kandev.Host
-	Store  *store.Store
+	// Context is what every job runs with; cancel it to stop the bridge.
+	Context context.Context
+	Config  config.Config
+	API     discordapi.API
+	Host    kandev.Host
+	Store   *store.Store
 	// Halted reports a REST 401; nil means never.
 	Halted func() bool
-	Now    func() time.Time
+	// HaltNotifier, when set, wakes the gateway on the first REST 401.
+	HaltNotifier interface{ OnHalt(func()) }
+	Now          func() time.Time
 }
 
 // Bridge is the running plugin.
 type Bridge struct {
-	cfg    config.Config
-	api    discordapi.API
-	host   kandev.Host
-	st     *store.Store
-	halted func() bool
-	now    func() time.Time
+	cfg          config.Config
+	api          discordapi.API
+	host         kandev.Host
+	st           *store.Store
+	halted       func() bool
+	haltNotifier interface{ OnHalt(func()) }
+	now          func() time.Time
 	// started is the process start, after which `failed` channels retry.
 	started time.Time
 
@@ -46,6 +52,8 @@ type Bridge struct {
 	sched  *Scheduler
 	timers timers
 	events *lru
+	// categoryMu serializes category selection and rollover (channels).
+	categoryMu sync.Mutex
 
 	mu           sync.Mutex
 	botUserID    string
@@ -55,9 +63,14 @@ type Bridge struct {
 	queueCounts  map[string]int       // session → queued messages
 	sessionTasks map[string]string    // session → task
 	steps        map[string]stepCache // workflow → step names
+	// readyGen counts READY events; caughtUp records, per channel, the
+	// generation whose missed messages were delivered.
+	readyGen int
+	caughtUp map[string]int
 }
 
-// New returns an idle bridge; Run starts it.
+// New returns an idle bridge; Run starts the gateway. The scheduler exists
+// from construction, so events may be handled before Run.
 func New(d Deps) *Bridge {
 	if d.Now == nil {
 		d.Now = time.Now
@@ -65,47 +78,49 @@ func New(d Deps) *Bridge {
 	if d.Halted == nil {
 		d.Halted = func() bool { return false }
 	}
+	if d.Context == nil {
+		d.Context = context.Background()
+	}
 	b := &Bridge{
-		cfg: d.Config, api: d.API, host: d.Host, st: d.Store, halted: d.Halted, now: d.Now, started: d.Now(),
-		events:  newLRU(4096),
-		guilds:  map[string]store.Guild{},
-		syncing: map[string]bool{},
+		cfg: d.Config, api: d.API, host: d.Host, st: d.Store, halted: d.Halted, haltNotifier: d.HaltNotifier,
+		now: d.Now, started: d.Now(), ctx: d.Context, sched: NewScheduler(d.Context),
+		events:   newLRU(4096),
+		guilds:   map[string]store.Guild{},
+		syncing:  map[string]bool{},
+		caughtUp: map[string]int{},
 	}
 	b.health = store.Health{GatewayState: gateway.StateStopped}
 	for _, binding := range d.Config.Bindings {
 		b.health.Bindings = append(b.health.Bindings, store.BindingHealth{WorkspaceID: binding.WorkspaceID, GuildID: binding.GuildID})
 	}
-	b.bind(context.Background())
 	return b
 }
 
-// bind sets the context jobs run with.
-func (b *Bridge) bind(ctx context.Context) {
-	b.ctx = ctx
-	b.sched = NewScheduler(ctx)
-}
-
-// Run connects the gateway through sess and blocks until ctx ends or the
-// gateway stops for good.
-func (b *Bridge) Run(ctx context.Context, sess *discordgo.Session) gateway.State {
-	b.bind(ctx)
+// Run connects the gateway through sess and blocks until the bridge context
+// ends or the gateway stops for good.
+func (b *Bridge) Run(sess *discordgo.Session) gateway.State {
+	ctx := b.ctx
 	sup := &gateway.Supervisor{
 		Conn:   sess,
 		Budget: &gateway.StoreBudget{St: b.st},
 		Halted: b.halted,
 		Report: func(s gateway.State) { b.setGateway(ctx, s) },
 	}
+	if b.haltNotifier != nil {
+		b.haltNotifier.OnHalt(sup.Halt)
+	}
+	gateway.Observe(sess, sup)
 	sess.ShouldReconnectOnError = false
 	sess.StateEnabled = false
 	sess.Identify.Intents = gateway.Intents
-	sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
-		sup.Identified(ctx)
-		b.onReady(ctx, r)
-	})
+	// Handlers run on the gateway goroutine in event order and only queue
+	// work, so per-channel message order survives into the task queue.
+	sess.SyncEvents = true
+	sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) { b.onReady(ctx, r) })
 	sess.AddHandler(func(_ *discordgo.Session, g *discordgo.GuildCreate) { b.onGuildCreate(ctx, g.Guild) })
 	sess.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) { b.onChannelDelete(ctx, c.Channel) })
 	sess.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) { b.onMessageCreate(ctx, m) })
-	sess.AddHandler(func(_ *discordgo.Session, i *discordgo.InteractionCreate) { b.onInteraction(ctx, i) })
+	sess.AddHandler(func(_ *discordgo.Session, i *discordgo.InteractionCreate) { go b.onInteraction(ctx, i) })
 	sess.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
 	go b.reconcileLoop(ctx)
 	final := sup.Run(ctx)
@@ -113,8 +128,9 @@ func (b *Bridge) Run(ctx context.Context, sess *discordgo.Session) gateway.State
 	return final
 }
 
-// onReady records the bot identity and reports bound guilds the bot is not
-// a member of. Provisioning follows each GUILD_CREATE.
+// onReady records the bot identity before any GUILD_CREATE is handled and
+// reports bound guilds the bot is not a member of. Provisioning follows
+// each GUILD_CREATE.
 func (b *Bridge) onReady(ctx context.Context, r *discordgo.Ready) {
 	member := map[string]bool{}
 	for _, g := range r.Guilds {
@@ -124,6 +140,7 @@ func (b *Bridge) onReady(ctx context.Context, r *discordgo.Ready) {
 	if r.User != nil {
 		b.botUserID = r.User.ID
 	}
+	b.readyGen++
 	for i := range b.health.Bindings {
 		bh := &b.health.Bindings[i]
 		bh.BotMember = member[bh.GuildID]
@@ -144,18 +161,38 @@ func (b *Bridge) onGuildCreate(ctx context.Context, g *discordgo.Guild) {
 	if !ok || g.Unavailable {
 		return
 	}
-	b.sched.Do("guild:"+g.ID, func(ctx context.Context) {
-		if b.provisionGuild(ctx, binding) {
-			b.reconcileWorkspace(ctx, binding, true)
+	b.mu.Lock()
+	for i := range b.health.Bindings {
+		if b.health.Bindings[i].GuildID == g.ID {
+			b.health.Bindings[i].BotMember, b.health.Bindings[i].InviteURL = true, ""
 		}
-	})
+	}
+	b.mu.Unlock()
+	b.sched.Do("guild:"+g.ID, func(ctx context.Context) { b.provisionAndReconcile(ctx, binding) })
 }
 
+func (b *Bridge) provisionAndReconcile(ctx context.Context, binding config.Binding) {
+	if b.provisionGuild(ctx, binding) {
+		b.reconcileWorkspace(ctx, binding, true)
+	}
+}
+
+// provisionGuild needs the bot's user ID for its channel overwrites; a
+// failed attempt is retried by the periodic reconcile.
 func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) bool {
-	rec, err := provision.Provision(ctx, b.api, b.st, provision.Input{
-		Binding: binding, Config: b.cfg, BotUserID: b.botID(),
-		Commands: commands.Definitions(), CommandsHash: commands.DefinitionsHash(b.cfg.ApplicationID), Now: b.now(),
-	})
+	botID := b.botID()
+	var (
+		rec store.Guild
+		err error
+	)
+	if botID == "" {
+		err = errors.New("the bot identity is not known yet (no READY)")
+	} else {
+		rec, err = provision.Provision(ctx, b.api, b.st, provision.Input{
+			Binding: binding, Config: b.cfg, BotUserID: botID,
+			Commands: commands.Definitions(), CommandsHash: commands.DefinitionsHash(b.cfg.ApplicationID), Now: b.now(),
+		})
+	}
 	b.mu.Lock()
 	for i := range b.health.Bindings {
 		bh := &b.health.Bindings[i]
@@ -178,6 +215,18 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 	}
 	log.Printf("discord: server %s provisioned for workspace %s", binding.GuildID, binding.WorkspaceID)
 	return true
+}
+
+// isMember reports whether the bot is known to be in a binding's guild.
+func (b *Bridge) isMember(workspaceID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, bh := range b.health.Bindings {
+		if bh.WorkspaceID == workspaceID {
+			return bh.BotMember
+		}
+	}
+	return false
 }
 
 func (b *Bridge) botID() string {

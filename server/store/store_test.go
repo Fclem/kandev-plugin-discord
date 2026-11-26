@@ -29,7 +29,7 @@ func TestChannelRoundTripMaintainsIndex(t *testing.T) {
 	ix, ok, err := s.ChannelIndex(ctx, "100")
 	require.NoError(t, err)
 	require.True(t, ok)
-	assert.Equal(t, Index{TaskID: "t1", WorkspaceID: "ws"}, ix)
+	assert.Equal(t, Index{TaskID: "t1", WorkspaceID: "ws", GuildID: "g"}, ix)
 
 	// A recreated channel moves the index; a deleted one drops it.
 	rec.ChannelID = "200"
@@ -38,7 +38,7 @@ func TestChannelRoundTripMaintainsIndex(t *testing.T) {
 	assert.False(t, ok)
 	all, err := s.IndexedChannels(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]Index{"200": {TaskID: "t1", WorkspaceID: "ws"}}, all)
+	assert.Equal(t, map[string]Index{"200": {TaskID: "t1", WorkspaceID: "ws", GuildID: "g"}}, all)
 
 	rec.Status = StatusDeleted
 	require.NoError(t, s.PutChannel(ctx, rec, "200"))

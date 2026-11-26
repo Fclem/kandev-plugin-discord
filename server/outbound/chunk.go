@@ -22,10 +22,27 @@ const (
 func Chunk(text string, limit int) []string {
 	c := chunker{limit: limit}
 	for _, line := range strings.SplitAfter(text, "\n") {
+		if len(c.out) > MaxChunks {
+			break // Limit keeps MaxChunks; one more proves truncation
+		}
 		c.add(line)
 	}
-	c.flush()
+	if len(c.out) <= MaxChunks {
+		c.flush()
+	}
 	return c.out
+}
+
+// maxFenceInfo bounds the info string reopened after a split; longer
+// openers reopen as a bare fence so the reopened header always leaves room.
+const maxFenceInfo = 32
+
+func fenceOpener(line string) string {
+	f := strings.TrimSpace(line)
+	if len(f) > len("```")+maxFenceInfo {
+		return "```"
+	}
+	return f
 }
 
 type chunker struct {
@@ -50,7 +67,7 @@ func (c *chunker) add(line string) {
 	after := c.fence
 	if isFence(line) {
 		if c.fence == "" {
-			after = strings.TrimSpace(line)
+			after = fenceOpener(line)
 		} else {
 			after = ""
 		}
@@ -60,6 +77,9 @@ func (c *chunker) add(line string) {
 		c.flush()
 	}
 	for c.cur.Len()+len(line)+c.reserve(c.fence) > c.limit {
+		if len(c.out) > MaxChunks {
+			return
+		}
 		room := c.limit - c.cur.Len() - c.reserve(c.fence)
 		cut := runeBoundary(line, max(room, 1))
 		c.cur.WriteString(line[:cut])

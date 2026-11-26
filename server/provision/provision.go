@@ -144,9 +144,13 @@ func Provision(ctx context.Context, api discordapi.API, st *store.Store, in Inpu
 	return rec, st.PutGuild(ctx, in.Binding.WorkspaceID, rec)
 }
 
+// ensureRole returns the role with the configured name: the stored one
+// while its name still matches the setting, otherwise one found by name or
+// created. Changing the setting therefore moves authority to the new role;
+// task channels converge their overwrites through their RolesKey.
 func ensureRole(ctx context.Context, api discordapi.API, guildID string, roles []*discordgo.Role, storedID, name string) (string, error) {
 	for _, r := range roles {
-		if r.ID == storedID {
+		if r.ID == storedID && r.Name == name {
 			return r.ID, nil
 		}
 	}

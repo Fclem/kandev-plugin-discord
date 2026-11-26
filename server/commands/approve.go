@@ -35,7 +35,8 @@ func (c *call) approve(ctx context.Context, taskID, request string, allow bool) 
 		c.respondPermission(ctx, taskID, strings.TrimPrefix(request, requestPermission), pick)
 		return
 	case strings.HasPrefix(request, requestStep) && allow:
-		c.approveStep(ctx, taskID, strings.TrimPrefix(request, requestStep))
+		session, fromStep, _ := strings.Cut(strings.TrimPrefix(request, requestStep), ":")
+		c.approveStep(ctx, taskID, session, fromStep)
 		return
 	case request != "":
 		c.reply(ctx, "Pick a request from the list.")
@@ -63,7 +64,7 @@ func (c *call) approve(ctx context.Context, taskID, request string, allow bool) 
 			c.reply(ctx, msgNothingAwaiting)
 			return
 		}
-		c.approveStep(ctx, taskID, session)
+		c.approveStep(ctx, taskID, session, "")
 	}
 }
 
@@ -207,8 +208,10 @@ func (c *call) respondPermission(ctx context.Context, taskID, interactionID stri
 }
 
 // approveStep approves the session's awaiting workflow step as the
-// caller's linked Kandev user, like the native Approve button.
-func (c *call) approveStep(ctx context.Context, taskID, sessionID string) {
+// caller's linked Kandev user, like the native Approve button. A non-empty
+// fromStepID (from a prompt button or autocomplete) must still be the
+// awaiting step; otherwise the prompt is stale and nothing is approved.
+func (c *call) approveStep(ctx context.Context, taskID, sessionID, fromStepID string) {
 	capability, refusal := c.capability(ctx)
 	if refusal != "" {
 		c.reply(ctx, refusal)
@@ -226,6 +229,11 @@ func (c *call) approveStep(ctx context.Context, taskID, sessionID string) {
 	}
 	if !approval.Awaiting {
 		c.reply(ctx, msgNothingAwaiting)
+		c.Refresh(taskID)
+		return
+	}
+	if fromStepID != "" && approval.FromStepID != fromStepID {
+		c.reply(ctx, "That approval prompt is out of date: the task is in another step now. Nothing was approved; use the current prompt.")
 		c.Refresh(taskID)
 		return
 	}
@@ -252,7 +260,7 @@ func (c *call) approveStep(ctx context.Context, taskID, sessionID string) {
 		moved += " → **" + approval.ToStepName + "**"
 	}
 	c.reply(ctx, fmt.Sprintf("✅ %s, recorded in Kandev as %s via Discord.", moved, receipt.Actor.DisplayName))
-	c.markStep(taskID, fmt.Sprintf("✅ Approved by %s via %s.", receipt.Actor.DisplayName, viaName(receipt.Actor)))
+	c.markStep(taskID, sessionID, approval.FromStepID, fmt.Sprintf("✅ Approved by %s via %s.", receipt.Actor.DisplayName, viaName(receipt.Actor)))
 }
 
 // refusal maps a receipt or command outcome to a reply; resolved reports
@@ -352,15 +360,16 @@ func (c *call) markPrompt(taskID, interactionID, outcome string) {
 	c.Refresh(taskID)
 }
 
-// markStep resolves the posted step approval prompt and forgets it.
-func (c *call) markStep(taskID, outcome string) {
+// markStep resolves the posted step approval prompt for one session and
+// step and forgets it; a prompt for another step is left to the sync.
+func (c *call) markStep(taskID, sessionID, fromStepID, outcome string) {
 	c.OnTask(taskID, func(ctx context.Context) {
 		rec, found, err := c.Store.Channel(ctx, taskID)
 		if err != nil || !found {
 			return
 		}
 		step, posted, err := c.Store.StepApproval(ctx, taskID)
-		if err != nil || !posted {
+		if err != nil || !posted || step.SessionID != sessionID || step.FromStepID != fromStepID {
 			return
 		}
 		c.poster().Resolve(ctx, rec.ChannelID, step.MessageID, outcome)

@@ -81,12 +81,24 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 		}
 		text, post := Render(msg, m.Opts)
 		if post {
-			if err := m.post(ctx, rec.ChannelID, text, m.TaskURL(task.ID)); err != nil {
+			skip := 0
+			if rec.OutboundCursor.PartialID == msg.ID {
+				skip = rec.OutboundCursor.PartsSent
+			}
+			err := m.post(ctx, rec.ChannelID, text, m.TaskURL(task.ID), skip, func(sent int) error {
+				rec.OutboundCursor.PartialID, rec.OutboundCursor.PartsSent = msg.ID, sent
+				if m.Save == nil {
+					return nil
+				}
+				return m.Save(ctx, *rec)
+			})
+			if err != nil {
 				return err
 			}
 		}
 		if at.Equal(cursorAt) {
 			rec.OutboundCursor.IDs = append(rec.OutboundCursor.IDs, msg.ID)
+			rec.OutboundCursor.PartialID, rec.OutboundCursor.PartsSent = "", 0
 		} else {
 			rec.OutboundCursor = store.Cursor{CreatedAt: msg.CreatedAt, IDs: []string{msg.ID}}
 			cursorAt = at
@@ -101,21 +113,26 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 }
 
 // post sends one rendered message as up to five chunks, then a truncation
-// line.
-func (m *Mirror) post(ctx context.Context, channelID, text, url string) error {
+// line, skipping the first skip parts (already delivered by an earlier
+// attempt) and checkpointing after each part, so a retry after a failed
+// part never repeats the parts Discord already shows.
+func (m *Mirror) post(ctx context.Context, channelID, text, url string, skip int, sent func(parts int) error) error {
 	chunks, truncated := Limit(Chunk(text, MaxMessageLength))
-	for _, c := range chunks {
-		if _, err := m.API.MessageSend(ctx, channelID, &discordgo.MessageSend{Content: c}); err != nil {
-			return fmt.Errorf("posting message: %w", err)
-		}
-	}
 	if truncated {
 		line := "… truncated — open the task in Kandev for the full message."
 		if url != "" {
 			line = "… truncated — open in Kandev: " + url
 		}
-		if _, err := m.API.MessageSend(ctx, channelID, &discordgo.MessageSend{Content: line}); err != nil {
-			return fmt.Errorf("posting truncation line: %w", err)
+		chunks = append(chunks, line)
+	}
+	for i := skip; i < len(chunks); i++ {
+		if _, err := m.API.MessageSend(ctx, channelID, &discordgo.MessageSend{Content: chunks[i]}); err != nil {
+			return fmt.Errorf("posting message part %d: %w", i+1, err)
+		}
+		if i < len(chunks)-1 {
+			if err := sent(i + 1); err != nil {
+				return fmt.Errorf("saving message progress: %w", err)
+			}
 		}
 	}
 	return nil
@@ -143,35 +160,42 @@ func heldBack(msgs []pluginsdk.Message, sessions []pluginsdk.Session) map[string
 }
 
 // card sends and pins the task card once, then edits it when its content
-// changes, at most every CardDebounce.
+// changes, at most every CardDebounce. A failed pin is retried on later
+// syncs without reposting the card.
 func (m *Mirror) card(ctx context.Context, rec *store.Channel, in CardInput, now time.Time) (time.Duration, error) {
 	embed, hash := Card(in)
-	if rec.CardMessageID != "" && rec.CardHash == hash {
-		return 0, nil
-	}
-	if rec.CardMessageID != "" {
+	var retry time.Duration
+	if rec.CardMessageID != "" && rec.CardHash != hash {
 		if wait := CardDebounce - now.Sub(rec.CardEditedAt); wait > 0 {
-			return wait, nil
-		}
-		embeds := []*discordgo.MessageEmbed{embed}
-		_, err := m.API.MessageEdit(ctx, &discordgo.MessageEdit{Channel: rec.ChannelID, ID: rec.CardMessageID, Embeds: &embeds})
-		if err == nil {
-			rec.CardHash, rec.CardEditedAt = hash, now
-			return 0, nil
-		}
-		if !discordapi.IsGone(err) {
-			return 0, fmt.Errorf("editing task card: %w", err)
+			retry = wait
+		} else {
+			embeds := []*discordgo.MessageEmbed{embed}
+			_, err := m.API.MessageEdit(ctx, &discordgo.MessageEdit{Channel: rec.ChannelID, ID: rec.CardMessageID, Embeds: &embeds})
+			switch {
+			case err == nil:
+				rec.CardHash, rec.CardEditedAt = hash, now
+			case discordapi.HasCode(err, discordapi.CodeUnknownMessage):
+				rec.CardMessageID, rec.CardPinned = "", false // deleted in Discord: post a new card
+			default:
+				return 0, fmt.Errorf("editing task card: %w", err)
+			}
 		}
 	}
-	msg, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}})
-	if err != nil {
-		return 0, fmt.Errorf("posting task card: %w", err)
+	if rec.CardMessageID == "" {
+		msg, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}})
+		if err != nil {
+			return 0, fmt.Errorf("posting task card: %w", err)
+		}
+		rec.CardMessageID, rec.CardHash, rec.CardEditedAt, rec.CardPinned = msg.ID, hash, now, false
 	}
-	rec.CardMessageID, rec.CardHash, rec.CardEditedAt = msg.ID, hash, now
-	if err := m.API.MessagePin(ctx, rec.ChannelID, msg.ID); err != nil && !discordapi.HasCode(err, discordapi.CodeMaxPinsReached) {
-		return 0, fmt.Errorf("pinning task card: %w", err)
+	if !rec.CardPinned {
+		err := m.API.MessagePin(ctx, rec.ChannelID, rec.CardMessageID)
+		if err != nil && !discordapi.HasCode(err, discordapi.CodeMaxPinsReached) {
+			return retry, fmt.Errorf("pinning task card: %w", err)
+		}
+		rec.CardPinned = true // pinned, or the channel's pin limit makes retrying pointless
 	}
-	return 0, nil
+	return retry, nil
 }
 
 func parseTime(s string) time.Time {

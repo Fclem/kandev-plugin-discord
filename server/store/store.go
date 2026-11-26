@@ -65,9 +65,13 @@ type Guild struct {
 
 // Cursor is the outbound position: the newest posted message's timestamp
 // and every posted message ID at exactly that timestamp (tie-break).
+// PartialID and PartsSent record a message whose chunks were only partly
+// posted, so a retry resumes after the last delivered chunk.
 type Cursor struct {
 	CreatedAt string   `json:"created_at,omitempty"`
 	IDs       []string `json:"ids,omitempty"`
+	PartialID string   `json:"partial_id,omitempty"`
+	PartsSent int      `json:"parts_sent,omitempty"`
 }
 
 // Channel is task/<id>/channel: the task's Discord channel and sync state.
@@ -79,9 +83,11 @@ type Channel struct {
 	Status          string            `json:"status"`
 	SyncedTitle     string            `json:"synced_title,omitempty"`
 	SyncedTopic     string            `json:"synced_topic,omitempty"`
+	RolesKey        string            `json:"roles_key,omitempty"`
 	LastRenamedAt   time.Time         `json:"last_renamed_at,omitzero"`
 	CardMessageID   string            `json:"card_message_id,omitempty"`
 	CardHash        string            `json:"card_hash,omitempty"`
+	CardPinned      bool              `json:"card_pinned,omitempty"`
 	CardEditedAt    time.Time         `json:"card_edited_at,omitzero"`
 	OutboundCursor  Cursor            `json:"outbound_cursor"`
 	InboundCursor   string            `json:"inbound_cursor,omitempty"`
@@ -148,6 +154,7 @@ type IdentifyBudget struct {
 type Index struct {
 	TaskID      string `json:"task_id"`
 	WorkspaceID string `json:"workspace_id"`
+	GuildID     string `json:"guild_id"`
 }
 
 // Store reads and writes typed records.
@@ -219,7 +226,7 @@ func (s *Store) PutChannel(ctx context.Context, c Channel, previousChannelID str
 	if c.Status == StatusDeleted {
 		return s.h.DeleteState(ctx, scopeInstance, "", indexPrefix+c.ChannelID)
 	}
-	return s.put(ctx, scopeInstance, "", indexPrefix+c.ChannelID, Index{TaskID: c.TaskID, WorkspaceID: c.WorkspaceID})
+	return s.put(ctx, scopeInstance, "", indexPrefix+c.ChannelID, Index{TaskID: c.TaskID, WorkspaceID: c.WorkspaceID, GuildID: c.GuildID})
 }
 
 // ChannelIndex resolves a Discord channel to its task.
@@ -241,7 +248,7 @@ func (s *Store) IndexedChannels(ctx context.Context) (map[string]Index, error) {
 		if !ok {
 			continue
 		}
-		out[id] = Index{TaskID: str(e.Value["task_id"]), WorkspaceID: str(e.Value["workspace_id"])}
+		out[id] = Index{TaskID: str(e.Value["task_id"]), WorkspaceID: str(e.Value["workspace_id"]), GuildID: str(e.Value["guild_id"])}
 	}
 	return out, nil
 }

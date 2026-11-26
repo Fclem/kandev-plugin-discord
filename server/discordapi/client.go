@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +24,7 @@ type Client struct {
 	s       *discordgo.Session
 	halted  atomic.Bool
 	limiter *limiter
+	onHalt  atomic.Pointer[func()]
 }
 
 var _ API = (*Client)(nil)
@@ -45,6 +49,10 @@ func NewClient(s *discordgo.Session) *Client {
 // Halted reports whether a 401 stopped all bot calls.
 func (c *Client) Halted() bool { return c.halted.Load() }
 
+// OnHalt registers fn to run once when a 401 halts the client, so the
+// gateway supervisor stops without waiting for the socket to drop.
+func (c *Client) OnHalt(fn func()) { c.onHalt.Store(&fn) }
+
 // do runs one bot-authenticated call through the halt flag and the global
 // budget, and maps its error.
 func (c *Client) do(ctx context.Context, call func(opt discordgo.RequestOption) error) error {
@@ -54,9 +62,16 @@ func (c *Client) do(ctx context.Context, call func(opt discordgo.RequestOption) 
 	if err := c.limiter.wait(ctx); err != nil {
 		return err
 	}
+	if c.halted.Load() { // halted while this call waited for the budget
+		return ErrHalted
+	}
 	err := mapError(call(discordgo.WithContext(ctx)))
 	if Status(err) == http.StatusUnauthorized {
-		c.halted.Store(true)
+		if c.halted.CompareAndSwap(false, true) {
+			if fn := c.onHalt.Load(); fn != nil {
+				(*fn)()
+			}
+		}
 		return errors.Join(ErrHalted, err)
 	}
 	return err
@@ -64,10 +79,9 @@ func (c *Client) do(ctx context.Context, call func(opt discordgo.RequestOption) 
 
 // doInteraction runs a call authenticated by an interaction token. Its 401
 // means an expired token, not a revoked bot token, so it never halts.
+// Interaction callbacks are outside Discord's global rate limit, so they
+// skip the shared budget and cannot queue past the 3-second deadline.
 func (c *Client) doInteraction(ctx context.Context, call func(opt discordgo.RequestOption) error) error {
-	if err := c.limiter.wait(ctx); err != nil {
-		return err
-	}
 	return mapError(call(discordgo.WithContext(ctx)))
 }
 
@@ -196,7 +210,29 @@ func mapError(err error) error {
 		}
 		return out
 	}
-	return err
+	return &transportError{msg: redactURLs(err.Error()), err: err}
+}
+
+// transportError hides request URLs: interaction and webhook paths embed
+// the interaction token. Unwrap keeps errors.Is for context errors.
+type transportError struct {
+	msg string
+	err error
+}
+
+func (e *transportError) Error() string { return e.msg }
+func (e *transportError) Unwrap() error { return e.err }
+
+var urlPattern = regexp.MustCompile(`https?://[^\s"']+`)
+
+// redactURLs keeps only the host of every URL in s.
+func redactURLs(s string) string {
+	return urlPattern.ReplaceAllStringFunc(s, func(raw string) string {
+		if u, err := url.Parse(strings.TrimRight(raw, `":,`)); err == nil && u.Host != "" {
+			return u.Scheme + "://" + u.Host + "/…"
+		}
+		return "<url>"
+	})
 }
 
 // limiter spaces calls evenly at a fixed rate.
