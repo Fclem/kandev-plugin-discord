@@ -97,6 +97,45 @@ func TestNonOperatorsCannotApprove(t *testing.T) {
 	assert.Empty(t, f.host.Receipts)
 }
 
+func TestArchivedChannelButtonsAndCommandsChangeNothing(t *testing.T) {
+	f := newFixture(t)
+	f.pendingPermission(t, "i1")
+	awaitingStep(f)
+	require.NoError(t, f.st.PutChannel(context.Background(), store.Channel{TaskID: "t1", WorkspaceID: wsID, GuildID: guildID, ChannelID: channelID, Status: store.StatusArchived}, ""))
+	for _, got := range []string{
+		f.run(f.button(opUser, prompts.PermissionButtonID("i1", 0))),
+		f.run(f.button(opUser, reviewButton(t, f))),
+		f.run(f.command(opUser, CmdApprove)),
+		f.run(f.command(opUser, CmdStop)),
+	} {
+		assert.Contains(t, got, "This channel is closed")
+	}
+	assert.Empty(t, f.host.Receipts)
+	assert.Empty(t, f.host.Responses)
+	assert.Empty(t, f.host.Approvals)
+	assert.Contains(t, f.run(f.command(guestUser, CmdStatus)), "KAN-1", "/status still answers")
+}
+
+func TestApprovalDoesNotResolveThePromptOfALaterVisit(t *testing.T) {
+	f := newFixture(t)
+	awaitingStep(f)
+	button := reviewButton(t, f)
+	f.host.ApproveFn = func(pluginsdk.ExactStepApprovalCommand) (*pluginsdk.CommandResult, pluginsdk.StepApprovalResult, error) {
+		// Before the answer lands, the task revisits Review → Done and the
+		// sync posts the new visit's prompt.
+		require.NoError(t, f.st.PutStepApproval(context.Background(), "t1", store.StepApproval{
+			SessionID: "s1", FromStepID: "review", ToStepID: "done", ResourceVersion: "sv-2", Nonce: "n2", MessageID: "m2",
+		}))
+		return &pluginsdk.CommandResult{Status: pluginsdk.CommandApplied}, pluginsdk.StepApprovalResult{}, nil
+	}
+	f.run(f.button(opUser, button))
+	require.Len(t, f.host.Approvals, 1)
+	step, posted, err := f.st.StepApproval(context.Background(), "t1")
+	require.NoError(t, err)
+	require.True(t, posted, "the new visit's prompt is kept")
+	assert.Equal(t, "sv-2", step.ResourceVersion)
+}
+
 func TestAlreadyResolvedRequestMarksThePrompt(t *testing.T) {
 	f := newFixture(t)
 	promptID := f.pendingPermission(t, "i1")

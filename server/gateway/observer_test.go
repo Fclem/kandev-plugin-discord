@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"kandev-plugin-discord/server/store"
 )
 
 // fakeGateway is a loopback Discord gateway driving the real discordgo
@@ -92,7 +95,7 @@ func session(t *testing.T, g *fakeGateway) *discordgo.Session {
 
 func runSupervised(t *testing.T, s *discordgo.Session, budget Budget) (State, *Supervisor) {
 	t.Helper()
-	sup := &Supervisor{Conn: s, Budget: budget, After: instant}
+	sup := &Supervisor{Dial: func() Conn { return s }, Budget: budget, After: instant}
 	Observe(s, sup)
 	t.Cleanup(func() { discordgo.Logger = nil })
 	s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
@@ -162,7 +165,7 @@ func TestReidentifyBeyondTheBudgetIsNeverSent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var refused atomic.Bool
-	sup := &Supervisor{Conn: s, Budget: b, After: instant, Report: func(st State) {
+	sup := &Supervisor{Dial: func() Conn { return s }, Budget: b, After: instant, Report: func(st State) {
 		if st.Name == StateRefused {
 			refused.Store(true)
 			cancel()
@@ -188,4 +191,119 @@ func TestRedactKeepsOnlyHosts(t *testing.T) {
 	got := redact("Post \"https://discord.com/api/v9/interactions/1/secret-token/callback\": timeout")
 	assert.NotContains(t, got, "secret-token")
 	assert.Contains(t, got, "<discord.com>")
+}
+
+// freshSessions dials a new observed session per attempt, as the bridge does.
+func freshSessions(t *testing.T, g *fakeGateway, sup *Supervisor) func() Conn {
+	return func() Conn {
+		s := session(t, g)
+		Observe(s, sup)
+		s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
+		return NewSession(s)
+	}
+}
+
+func TestInvalidatedSessionIsNeverResumed(t *testing.T) {
+	var g *fakeGateway
+	second := make(chan int, 1)
+	g = newFakeGateway(t, func(c *websocket.Conn, dial int32) {
+		if dial == 1 {
+			if !g.readIdentify(c) {
+				return
+			}
+			ready(c, 1)
+			time.Sleep(50 * time.Millisecond)
+			_ = c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4009, "Session timed out."))
+			time.Sleep(100 * time.Millisecond)
+			return
+		}
+		var frame struct {
+			Op int `json:"op"`
+		}
+		_ = c.ReadJSON(&frame)
+		second <- frame.Op
+		_ = c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4004, "stop the test"))
+		time.Sleep(100 * time.Millisecond)
+	})
+	sup := &Supervisor{Budget: budget(), After: instant}
+	sup.Dial = freshSessions(t, g, sup)
+	t.Cleanup(func() { discordgo.Logger = nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	sup.Run(ctx)
+	assert.Equal(t, 2, <-second, "a new session IDENTIFYs (op 2) instead of RESUMEing (op 6)")
+}
+
+// silentGateway upgrades the websocket and then never speaks.
+func silentGateway(t *testing.T) *fakeGateway {
+	t.Helper()
+	g := &fakeGateway{}
+	up := websocket.Upgrader{}
+	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/gateway") {
+			_ = json.NewEncoder(w).Encode(map[string]string{"url": "ws://" + strings.TrimPrefix(g.srv.URL, "http://") + "/ws"})
+			return
+		}
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		g.dials.Add(1)
+		defer c.Close()
+		_, _, _ = c.ReadMessage() // until the client gives up
+	}))
+	t.Cleanup(g.srv.Close)
+	return g
+}
+
+func TestStalledHandshakeTimesOutAndHaltInterruptsIt(t *testing.T) {
+	g := silentGateway(t)
+	var timedOut atomic.Bool
+	var halted atomic.Bool
+	sup := &Supervisor{Budget: budget(), After: instant, Handshake: 200 * time.Millisecond, Halted: halted.Load}
+	sup.Report = func(st State) {
+		if st.Name == StateReconnecting && strings.Contains(st.Reason, "timed out") && timedOut.CompareAndSwap(false, true) {
+			sup.Handshake = time.Minute // the next attempt waits for the halt
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				halted.Store(true)
+				sup.Halt()
+			}()
+		}
+	}
+	sup.Dial = freshSessions(t, g, sup)
+	t.Cleanup(func() { discordgo.Logger = nil })
+	done := make(chan State, 1)
+	go func() { done <- sup.Run(context.Background()) }()
+	select {
+	case final := <-done:
+		assert.True(t, timedOut.Load(), "the first attempt timed out")
+		assert.Equal(t, StateHalted, final.Name, "the halt interrupted the second handshake")
+		assert.GreaterOrEqual(t, g.dials.Load(), int32(2))
+	case <-time.After(5 * time.Second):
+		t.Fatal("the supervisor stayed blocked in the handshake")
+	}
+}
+
+func TestUnwritableBudgetRefusesToIdentify(t *testing.T) {
+	g := newFakeGateway(t, func(c *websocket.Conn, _ int32) {})
+	mem := store.NewMemoryHost()
+	b := &StoreBudget{St: store.New(readOnly{mem})}
+	ctx, cancel := context.WithCancel(context.Background())
+	var reports []State
+	sup := &Supervisor{Budget: b, After: func(time.Duration) <-chan time.Time { cancel(); return instant(0) }}
+	sup.Report = func(st State) { reports = append(reports, st) }
+	sup.Dial = freshSessions(t, g, sup)
+	t.Cleanup(func() { discordgo.Logger = nil })
+	sup.Run(ctx)
+	assert.Equal(t, int32(0), g.dials.Load(), "no connection without a recorded reservation")
+	require.NotEmpty(t, reports)
+	assert.Contains(t, reports[0].Reason, "identify counter unavailable")
+}
+
+// readOnly is a state host whose writes fail.
+type readOnly struct{ *store.MemoryHost }
+
+func (readOnly) SetState(context.Context, string, string, string, map[string]any) error {
+	return errors.New("state is read-only")
 }

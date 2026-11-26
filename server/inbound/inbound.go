@@ -96,8 +96,9 @@ func (h *Handler) Handle(ctx context.Context, rec store.Channel, m *discordgo.Me
 
 // CatchUp handles messages posted after the inbound cursor while the bridge
 // was offline: recent ones go through Handle, older ones are marked as not
-// delivered.
-func (h *Handler) CatchUp(ctx context.Context, rec store.Channel) (store.Channel, error) {
+// delivered. With until set (a live message's ID), it stops before that
+// message: the live message is no missed one, and its own delivery follows.
+func (h *Handler) CatchUp(ctx context.Context, rec store.Channel, until string) (store.Channel, error) {
 	for {
 		batch, err := h.API.ChannelMessages(ctx, rec.ChannelID, 100, rec.InboundCursor)
 		if err != nil {
@@ -107,7 +108,12 @@ func (h *Handler) CatchUp(ctx context.Context, rec store.Channel) (store.Channel
 			return rec, nil
 		}
 		slices.SortFunc(batch, func(a, b *discordgo.Message) int { return discordapi.CompareIDs(a.ID, b.ID) })
+		reached := false
 		for _, m := range batch {
+			if until != "" && discordapi.CompareIDs(m.ID, until) >= 0 {
+				reached = true
+				break
+			}
 			switch {
 			case !Deliverable(m):
 				rec, err = h.advance(rec, m.ID), nil
@@ -124,7 +130,7 @@ func (h *Handler) CatchUp(ctx context.Context, rec store.Channel) (store.Channel
 		if err := h.Save(ctx, rec); err != nil {
 			return rec, err
 		}
-		if len(batch) < 100 {
+		if reached || len(batch) < 100 {
 			return rec, nil
 		}
 	}

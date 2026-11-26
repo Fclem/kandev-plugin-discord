@@ -54,7 +54,7 @@ func newSupervisor(conn Conn, budget Budget) (*Supervisor, *[]State) {
 	var mu sync.Mutex
 	states := &[]State{}
 	return &Supervisor{
-		Conn: conn, Budget: budget, After: instant,
+		Dial: func() Conn { return conn }, Budget: budget, After: instant,
 		Report: func(s State) { mu.Lock(); *states = append(*states, s); mu.Unlock() },
 	}, states
 }
@@ -125,7 +125,7 @@ func TestReconnectsAfterDisconnect(t *testing.T) {
 	final := <-done
 	assert.Equal(t, StateStopped, final.Name)
 	assert.Equal(t, 2, conn.opens)
-	assert.Equal(t, 1, conn.closes)
+	assert.Equal(t, 2, conn.closes, "each connection is closed: after the drop and at the stop")
 }
 
 func TestRestHaltWhileConnectedClosesTheSocket(t *testing.T) {

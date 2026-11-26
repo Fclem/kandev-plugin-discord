@@ -394,10 +394,9 @@ func (f *Fake) MessageSend(_ context.Context, channelID string, data *discordgo.
 // MessageSendOnce is recorded (and fails) as MessageSend, so tests see one
 // kind of post. A repeated nonce returns the first message, like Discord's
 // enforce_nonce within its window.
-func (f *Fake) MessageSendOnce(_ context.Context, channelID, content, nonce string) (*discordgo.Message, error) {
+func (f *Fake) MessageSendOnce(_ context.Context, channelID string, data *discordgo.MessageSend, nonce string) (*discordgo.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	data := &discordgo.MessageSend{Content: content}
 	if err := f.record("MessageSend", channelID, data); err != nil {
 		return nil, err
 	}

@@ -96,4 +96,33 @@ func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding)
 			b.catchUp(ix.TaskID, channelID)
 		}
 	}
+	b.reconcileCreations(ctx, binding, seen)
+}
+
+// reconcileCreations syncs tasks whose channel creation is unrecorded but
+// that the task list no longer shows (deleted while the bridge was down),
+// so a channel Discord made for them is closed, and drops inventory
+// entries whose creation has settled.
+func (b *Bridge) reconcileCreations(ctx context.Context, binding config.Binding, seen map[string]bool) {
+	pending, err := b.st.CreatingTasks(ctx)
+	if err != nil {
+		log.Printf("discord: reconcile workspace %s: reading the creation inventory: %v", binding.WorkspaceID, err)
+		return
+	}
+	for taskID, ix := range pending {
+		if ix.WorkspaceID != binding.WorkspaceID || seen[taskID] {
+			continue // listed tasks are synced above
+		}
+		rec, found, err := b.st.Channel(ctx, taskID)
+		switch {
+		case err != nil:
+			continue
+		case found && rec.Status == store.StatusCreating:
+			b.Kick(taskID)
+		default:
+			if err := b.st.DeleteCreating(ctx, taskID); err != nil {
+				log.Printf("discord: task %s: clearing the creation inventory: %v", taskID, err)
+			}
+		}
+	}
 }

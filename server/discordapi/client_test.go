@@ -126,7 +126,7 @@ func TestCreationsAreNeverResentOnBadGateway(t *testing.T) {
 		_ = json.Unmarshal(raw, &body)
 		w.WriteHeader(http.StatusBadGateway)
 	})
-	_, err := c.MessageSendOnce(context.Background(), "7", "@here part", "n1")
+	_, err := c.MessageSendOnce(context.Background(), "7", &discordgo.MessageSend{Content: "@here part"}, "n1")
 	require.Error(t, err)
 	assert.Equal(t, int32(1), posts.Load(), "Discord may have stored the first request")
 	assert.Equal(t, "n1", body["nonce"])

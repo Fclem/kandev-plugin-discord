@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -323,7 +324,7 @@ func TestFailedLiveDeliveryIsRetriedBeforeLaterMessages(t *testing.T) {
 	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
 	h.api.Members[author.ID] = member
 	ctx := context.Background()
-	h.b.ensureCaughtUp(ctx, rec, g)
+	h.b.ensureCaughtUp(ctx, rec, g, "")
 
 	at := *h.clock
 	first := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(at.Add(-2 * time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "first", Author: author})
@@ -401,14 +402,23 @@ func TestStatusChannelAnnouncesLifecycleTransitions(t *testing.T) {
 	h.wait()
 	assert.Contains(t, notes()[1], "Disconnected")
 
-	h.reconcile(t) // REST re-provisioning while the gateway is still down
-	h.b.provisionGuild(ctx, config.Binding{WorkspaceID: wsID, GuildID: guildID})
+	binding := config.Binding{WorkspaceID: wsID, GuildID: guildID}
+	h.b.provisionGuild(ctx, binding) // REST re-provisioning while the gateway is still down
 	assert.Len(t, notes(), 2, "no false all-clear")
+
+	h.api.FailNext("GuildRoles", &discordapi.Error{Status: 503})
+	h.b.provisionGuild(ctx, binding)
+	require.Len(t, notes(), 3)
+	assert.Contains(t, notes()[2], "Provisioning failed")
+	h.b.provisionGuild(ctx, binding)
+	require.Len(t, notes(), 4)
+	assert.Contains(t, notes()[3], "Provisioning succeeded")
+	assert.NotContains(t, notes()[3], "Reconnected", "the gateway outage is still on")
 
 	h.b.setGateway(ctx, gateway.State{Name: gateway.StateConnected})
 	h.ready(t)
-	require.Len(t, notes(), 3)
-	assert.Contains(t, notes()[2], "Reconnected")
+	require.Len(t, notes(), 5)
+	assert.Contains(t, notes()[4], "Reconnected")
 }
 
 func TestUnreadableRouteRetriesFromHistoryBeforeLaterMessages(t *testing.T) {
@@ -422,7 +432,7 @@ func TestUnreadableRouteRetriesFromHistoryBeforeLaterMessages(t *testing.T) {
 	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
 	h.api.Members[author.ID] = member
 	ctx := context.Background()
-	h.b.ensureCaughtUp(ctx, rec, g)
+	h.b.ensureCaughtUp(ctx, rec, g, "")
 
 	at := *h.clock
 	first := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(at.Add(-2 * time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "first", Author: author, Member: member})
@@ -513,13 +523,42 @@ func TestTaskClosedDuringAnUnrecordedCreationClosesItsChannel(t *testing.T) {
 
 	archived := h.clock.Format(time.RFC3339)
 	h.host.Tasks["1"].ArchivedAt = &archived
-	h.reconcile(t)
+	h.reconcile(t) // adopts the unrecorded channel and saves that first
+	assert.Equal(t, store.StatusActive, h.channel(t, "1").Status)
+	h.reconcile(t) // then closes it like any other
 	rec := h.channel(t, "1")
 	assert.Equal(t, store.StatusArchived, rec.Status)
 	require.NotEmpty(t, rec.ChannelID)
 	g, _ := h.b.guild(wsID)
 	assert.Contains(t, g.ArchiveCategoryIDs, h.api.Channels[rec.ChannelID].ParentID)
 	assert.Len(t, h.api.CallsTo("GuildChannelCreate"), 3+1, "nothing new was created")
+}
+
+func TestTaskDeletedDuringAnUnrecordedCreationClosesItsChannel(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.ClosedChannelAction = config.ClosedDelete })
+	h.api.StartIDsAt(*h.clock)
+	flaky := &flakyState{MemoryHost: h.mem, key: "task/1/channel", fail: 2}
+	h.st = store.New(flaky)
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	require.Equal(t, store.StatusCreating, h.channel(t, "1").Status)
+	var made string
+	for id, ch := range h.api.Channels {
+		if ch.Name == "kan-1-fix-login" {
+			made = id
+		}
+	}
+	require.NotEmpty(t, made)
+
+	delete(h.host.Tasks, "1") // hard-deleted while the bridge was down
+	h.reconcile(t)
+	h.reconcile(t)
+	assert.NotContains(t, h.api.Channels, made, "the unrecorded channel was deleted")
+	assert.Equal(t, store.StatusDeleted, h.channel(t, "1").Status)
+	pending, err := h.st.CreatingTasks(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending)
 }
 
 func TestArchivedChannelPromptsLoseTheirButtonsEventually(t *testing.T) {
@@ -551,4 +590,62 @@ func TestArchivedChannelPromptsLoseTheirButtonsEventually(t *testing.T) {
 	stored, err := h.st.Prompts(context.Background(), "1")
 	require.NoError(t, err)
 	assert.Empty(t, stored.Items)
+}
+
+func TestLiveMessageIsNotTakenForMissedHistory(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.InboundCatchupMaxAge = 0 }) // missed messages are never delivered
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	member := &discordgo.Member{Roles: []string{g.OperatorRoleID}}
+	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
+	h.api.Members[author.ID] = member
+
+	live := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(-time.Second)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "go", Author: author, Member: member})
+	h.b.onMessageCreate(context.Background(), &discordgo.MessageCreate{Message: live}) // already in REST history
+	h.wait()
+	require.Len(t, h.host.Sent, 1, "the live message is delivered, not refused as offline history")
+	assert.Equal(t, "alice (Discord): go", h.host.Sent[0].Text)
+}
+
+func TestMissingChannelIndexIsRepairedAndCaughtUp(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
+	h.api.Members[author.ID] = &discordgo.Member{Roles: []string{g.OperatorRoleID}}
+	ctx := context.Background()
+	require.NoError(t, h.mem.DeleteState(ctx, "instance", "", "channel:"+rec.ChannelID)) // its write failed
+	m := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(-time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "unroutable", Author: author})
+	h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: m})
+	h.wait()
+	require.Empty(t, h.host.Sent)
+
+	h.reconcile(t)
+	h.wait()
+	ix, found, err := h.st.ChannelIndex(ctx, rec.ChannelID)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, "1", ix.TaskID)
+	require.Len(t, h.host.Sent, 1, "the message posted while unroutable is caught up")
+	assert.Equal(t, "alice (Discord): unroutable", h.host.Sent[0].Text)
+}
+
+func TestCloseHoldIsBoundedFromTheFirstAttempt(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.CloseTrigger = config.CloseOnTerminal })
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	h.host.Tasks["1"].State = "COMPLETED"
+	h.host.Sessions["1"] = []pluginsdk.Session{{ID: "s1", TaskID: "1", State: "RUNNING"}} // never stops
+	for i := range 4 {
+		h.host.Tasks["1"].UpdatedAt = h.clock.Format(time.RFC3339) // renamed before each attempt
+		h.event(t, fmt.Sprint("e", i), "task.updated", map[string]any{"task_id": "1"})
+		require.Equal(t, store.StatusActive, h.channel(t, "1").Status)
+		*h.clock = h.clock.Add(10 * time.Minute)
+	}
+	h.event(t, "e4", "task.updated", map[string]any{"task_id": "1"})
+	assert.Equal(t, store.StatusArchived, h.channel(t, "1").Status, "40 minutes after the first attempt")
 }

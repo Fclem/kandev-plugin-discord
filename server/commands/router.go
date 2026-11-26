@@ -91,6 +91,9 @@ func (c *call) command(ctx context.Context) {
 		c.reply(ctx, "Commands work only in Kandev task channels.")
 		return
 	}
+	if data.Name != CmdStatus && !c.requireOpen(ctx, taskID) {
+		return
+	}
 	switch data.Name {
 	case CmdStatus:
 		c.status(ctx, taskID)
@@ -109,13 +112,29 @@ func (c *call) command(ctx context.Context) {
 	}
 }
 
-// taskOfChannel maps the interaction's channel to an active task channel.
+// taskOfChannel maps the interaction's channel to its task channel (open
+// or archived).
 func (c *call) taskOfChannel(ctx context.Context) (string, bool) {
 	ix, ok, err := c.Store.ChannelIndex(ctx, c.i.ChannelID)
 	if err != nil || !ok || ix.WorkspaceID != c.binding.WorkspaceID || ix.GuildID != c.i.GuildID {
 		return "", false
 	}
 	return ix.TaskID, true
+}
+
+// requireOpen admits actions on a task only from its active channel: an
+// archived channel's leftover buttons and commands change nothing.
+func (c *call) requireOpen(ctx context.Context, taskID string) bool {
+	rec, found, err := c.Store.Channel(ctx, taskID)
+	switch {
+	case err != nil:
+		c.reply(ctx, "Kandev could not check this channel right now; try again.")
+		return false
+	case !found || rec.Status != store.StatusActive || rec.ChannelID != c.i.ChannelID:
+		c.reply(ctx, "This channel is closed; act on the task in Kandev"+c.linkSuffix(taskID))
+		return false
+	}
+	return true
 }
 
 // maxReply is Discord's message content limit (characters).

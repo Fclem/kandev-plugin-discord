@@ -92,13 +92,16 @@ type Input struct {
 	Commands     []*discordgo.ApplicationCommand
 	CommandsHash string
 	Now          time.Time
+	// SaveRoles publishes a role change (store and caller state) before the
+	// later steps; nil stores the record.
+	SaveRoles func(ctx context.Context, rec store.Guild) error
 }
 
 // Provision creates or reuses every guild object and stores the record.
-// A change of operator or viewer role is stored as soon as the roles are
-// resolved, so a failure in a later step still moves authority: task
-// channels converge on the new roles (their RolesKey no longer matches)
-// and nothing is posted under the former ones.
+// A change of operator or viewer role is published through SaveRoles as
+// soon as the roles are resolved, so a failure in a later step still moves
+// authority: task channels converge on the new roles (their RolesKey no
+// longer matches) and nothing is posted under the former ones.
 func Provision(ctx context.Context, api discordapi.API, st *store.Store, in Input) (store.Guild, error) {
 	rec, _, err := st.Guild(ctx, in.Binding.WorkspaceID)
 	if err != nil {
@@ -122,7 +125,11 @@ func Provision(ctx context.Context, api discordapi.API, st *store.Store, in Inpu
 		}
 	}
 	if rec.OperatorRoleID != prev.OperatorRoleID || rec.ViewerRoleID != prev.ViewerRoleID {
-		if err := st.PutGuild(ctx, in.Binding.WorkspaceID, rec); err != nil {
+		save := in.SaveRoles
+		if save == nil {
+			save = func(ctx context.Context, rec store.Guild) error { return st.PutGuild(ctx, in.Binding.WorkspaceID, rec) }
+		}
+		if err := save(ctx, rec); err != nil {
 			return prev, fmt.Errorf("saving roles: %w", err)
 		}
 	}

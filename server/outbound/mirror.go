@@ -2,12 +2,11 @@ package outbound
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -42,29 +41,49 @@ type Input struct {
 	Now      time.Time
 }
 
-// Sync posts new messages, status lines, and the card. It returns the new
-// record and, when the card edit was debounced, when to sync again. A card
-// failure is returned as a *CardError: messages and status lines were
-// flushed.
-func (m *Mirror) Sync(ctx context.Context, in Input) (store.Channel, time.Duration, error) {
-	rec := in.Rec
-	if err := m.pull(ctx, in.Task, &rec, in.Sessions); err != nil {
-		return rec, 0, err
+// Result is one Sync's outcome.
+type Result struct {
+	Rec store.Channel
+	// Retry is when to sync again: a debounced card edit, or a held
+	// message whose session already stopped.
+	Retry time.Duration
+	// Held reports a message left for a later sync because its session
+	// was, or may have been, still writing it.
+	Held bool
+}
+
+// heldRecheck is how soon a message held only because its session changed
+// state during the sync is looked at again.
+const heldRecheck = 5 * time.Second
+
+// Sync posts new messages, status lines, and the card. A card failure is
+// returned as a *CardError: messages and status lines were flushed.
+func (m *Mirror) Sync(ctx context.Context, in Input) (Result, error) {
+	res := Result{Rec: in.Rec}
+	rec := &res.Rec
+	held, recheck, err := m.pull(ctx, in.Task, rec, in.Sessions)
+	res.Held = held
+	if err != nil {
+		return res, err
 	}
 	lines, next := StatusLines(rec.SessionStates, in.Sessions)
 	for _, line := range lines {
 		if _, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Content: line}); err != nil {
-			return rec, 0, fmt.Errorf("posting status line: %w", err)
+			return res, fmt.Errorf("posting status line: %w", err)
 		}
 	}
 	if !maps.Equal(next, rec.SessionStates) {
 		rec.SessionStates = next
 	}
-	retry, err := m.card(ctx, &rec, in.Card, in.Now)
-	if err != nil {
-		return rec, retry, &CardError{Err: err}
+	retry, err := m.card(ctx, rec, in.Card, in.Now)
+	if recheck && (retry == 0 || retry > heldRecheck) {
+		retry = heldRecheck
 	}
-	return rec, retry, nil
+	res.Retry = retry
+	if err != nil {
+		return res, &CardError{Err: err}
+	}
+	return res, nil
 }
 
 // CardError is a task card failure; the card is cosmetic and never holds
@@ -76,18 +95,26 @@ func (e *CardError) Unwrap() error { return e.Err }
 
 // pull posts messages created after the cursor, oldest first. While a
 // session runs, its newest agent message may still be growing, so mirroring
-// stops before it until the turn ends.
+// stops before it until the turn ends. Sessions are read before and after
+// the messages: a session running (or changing state) in either read may
+// have been streaming when its message was read. It reports whether it
+// stopped at such a message, and whether to look again soon because no
+// session runs any more (no later event may come).
 //
 // The Host filters by the precise cursor but serializes CreatedAt in whole
 // seconds, so returned rows are compared with the cursor at that precision;
 // the ID tie-break separates rows within one second.
-func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Channel, sessions []pluginsdk.Session) error {
+func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Channel, sessions []pluginsdk.Session) (held, recheck bool, err error) {
 	msgs, err := m.Host.ListMessages(ctx, task.ID, rec.OutboundCursor.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("listing messages: %w", err)
+		return false, false, fmt.Errorf("listing messages: %w", err)
+	}
+	after, err := m.Host.ListSessions(ctx, task.ID)
+	if err != nil {
+		return false, false, fmt.Errorf("listing sessions: %w", err)
 	}
 	sort.SliceStable(msgs, func(i, j int) bool { return parseTime(msgs[i].CreatedAt).Before(parseTime(msgs[j].CreatedAt)) })
-	held := heldBack(msgs, sessions)
+	holds := heldBack(msgs, sessions, after)
 	c := &rec.OutboundCursor
 	cursorAt := second(c.CreatedAt)
 	for _, msg := range msgs {
@@ -95,13 +122,13 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 		if at.Before(cursorAt) || (at.Equal(cursorAt) && slices.Contains(c.IDs, msg.ID)) {
 			continue
 		}
-		if held[msg.ID] {
-			return nil
+		if holds[msg.ID] {
+			return true, !slices.ContainsFunc(after, func(s pluginsdk.Session) bool { return Running(s.State) }), nil
 		}
 		text, post := Render(msg, m.Opts)
 		if post {
 			if err := m.post(ctx, rec, msg.ID, Parts(text, m.TaskURL(task.ID))); err != nil {
-				return err
+				return false, false, err
 			}
 		}
 		if at.Equal(cursorAt) {
@@ -112,11 +139,11 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 		c.PartialID, c.PartialChannelID, c.PartsSent = "", "", 0
 		if post {
 			if err := m.save(ctx, *rec); err != nil {
-				return fmt.Errorf("saving cursor: %w", err)
+				return false, false, fmt.Errorf("saving cursor: %w", err)
 			}
 		}
 	}
-	return nil
+	return false, false, nil
 }
 
 // Parts renders one message as up to five chunks plus, when it was cut, a
@@ -148,7 +175,7 @@ func (m *Mirror) post(ctx context.Context, rec *store.Channel, msgID string, par
 	}
 	for c.PartsSent < len(parts) {
 		nonce := PartNonce(rec.ChannelID, msgID, c.PartsSent)
-		if _, err := m.API.MessageSendOnce(ctx, rec.ChannelID, parts[c.PartsSent], nonce); err != nil {
+		if _, err := m.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Content: parts[c.PartsSent]}, nonce); err != nil {
 			return fmt.Errorf("posting message part %d: %w", c.PartsSent+1, err)
 		}
 		c.PartsSent++
@@ -164,8 +191,7 @@ func (m *Mirror) post(ctx context.Context, rec *store.Channel, msgID string, par
 // PartNonce identifies one part of one Kandev message in one channel, in
 // Discord's 25-character nonce limit.
 func PartNonce(channelID, msgID string, part int) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%d", channelID, msgID, part))
-	return hex.EncodeToString(sum[:12])
+	return discordapi.Nonce(channelID, msgID, strconv.Itoa(part))
 }
 
 func (m *Mirror) save(ctx context.Context, rec store.Channel) error {
@@ -178,11 +204,19 @@ func (m *Mirror) save(ctx context.Context, rec store.Channel) error {
 // second parses a timestamp at the Host DTO's whole-second precision.
 func second(s string) time.Time { return parseTime(s).Truncate(time.Second) }
 
-// heldBack marks the newest agent message of each running session.
-func heldBack(msgs []pluginsdk.Message, sessions []pluginsdk.Session) map[string]bool {
+// heldBack marks the newest agent message of each session that was running
+// in the read before or after the messages, or changed state between them.
+func heldBack(msgs []pluginsdk.Message, before, after []pluginsdk.Session) map[string]bool {
 	running := map[string]bool{}
-	for _, s := range sessions {
+	state := map[string]string{}
+	for _, s := range before {
+		state[s.ID] = s.State
 		if Running(s.State) {
+			running[s.ID] = true
+		}
+	}
+	for _, s := range after {
+		if Running(s.State) || state[s.ID] != s.State {
 			running[s.ID] = true
 		}
 	}
@@ -222,11 +256,15 @@ func (m *Mirror) card(ctx context.Context, rec *store.Channel, in CardInput, now
 		}
 	}
 	if rec.CardMessageID == "" {
-		msg, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}})
+		// CardPosts makes a retry after a lost reply reuse the nonce, and a
+		// replacement for a deleted card use a new one.
+		nonce := discordapi.Nonce(rec.ChannelID, "card", strconv.Itoa(rec.CardPosts))
+		msg, err := m.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Embeds: []*discordgo.MessageEmbed{embed}}, nonce)
 		if err != nil {
 			return 0, fmt.Errorf("posting task card: %w", err)
 		}
 		rec.CardMessageID, rec.CardHash, rec.CardEditedAt, rec.CardPinned = msg.ID, hash, now, false
+		rec.CardPosts++
 	}
 	if !rec.CardPinned {
 		err := m.API.MessagePin(ctx, rec.ChannelID, rec.CardMessageID)

@@ -14,12 +14,14 @@ type Scheduler struct {
 
 	mu     sync.Mutex
 	queues map[string][]func(context.Context)
-	wg     sync.WaitGroup
+	idle   *sync.Cond // signaled when the last queue drains
 }
 
 // NewScheduler returns a scheduler whose jobs receive ctx.
 func NewScheduler(ctx context.Context) *Scheduler {
-	return &Scheduler{ctx: ctx, queues: map[string][]func(context.Context){}}
+	s := &Scheduler{ctx: ctx, queues: map[string][]func(context.Context){}}
+	s.idle = sync.NewCond(&s.mu)
+	return s
 }
 
 // Do queues job under key.
@@ -31,17 +33,18 @@ func (s *Scheduler) Do(key string, job func(context.Context)) {
 	if running {
 		return
 	}
-	s.wg.Add(1)
 	go s.drain(key)
 }
 
 func (s *Scheduler) drain(key string) {
-	defer s.wg.Done()
 	for {
 		s.mu.Lock()
 		q := s.queues[key]
 		if len(q) == 0 {
 			delete(s.queues, key)
+			if len(s.queues) == 0 {
+				s.idle.Broadcast()
+			}
 			s.mu.Unlock()
 			return
 		}
@@ -54,8 +57,15 @@ func (s *Scheduler) drain(key string) {
 	}
 }
 
-// Wait blocks until every queued job finished (tests).
-func (s *Scheduler) Wait() { s.wg.Wait() }
+// Wait blocks until no job is queued or running (tests). Unlike a
+// WaitGroup it tolerates jobs queued concurrently, for example by timers.
+func (s *Scheduler) Wait() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for len(s.queues) > 0 {
+		s.idle.Wait()
+	}
+}
 
 // timers holds one pending delayed action per key; a later request with an
 // earlier deadline replaces it.

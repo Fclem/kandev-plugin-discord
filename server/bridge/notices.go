@@ -10,40 +10,51 @@ import (
 	"kandev-plugin-discord/server/store"
 )
 
-// Lifecycle notices in #kandev-status: one per meaningful per-guild
-// transition (connected, provisioning failed, disconnected, reconnected),
-// never one per routine gateway reconnect.
-const (
-	noticeUp     = "up"
-	noticeDown   = "down"
-	noticeFailed = "failed"
-)
+// guildNotices tracks the lifecycle notices posted to one guild's
+// #kandev-status. Gateway outages and provisioning failures are tracked
+// apart: each is cleared only by its own recovery, so a REST provisioning
+// pass during a gateway outage never posts an all-clear. Routine gateway
+// reconnects post nothing.
+type guildNotices struct {
+	announced bool // "connected" was posted
+	outage    bool // an outage was posted and the gateway has not returned
+	failed    bool // a provisioning failure was posted and not yet recovered
+}
 
-// noticeUp records a successful provisioning and announces it when it ends
-// a first start, an outage, or a provisioning failure. Provisioning also
-// runs over REST while the gateway is down: that ends no outage.
+// noticesOf returns a guild's notice state; the caller holds b.mu.
+func (b *Bridge) noticesOf(guildID string) *guildNotices {
+	n := b.notices[guildID]
+	if n == nil {
+		n = &guildNotices{}
+		b.notices[guildID] = n
+	}
+	return n
+}
+
+// noticeUp records a successful provisioning: it ends a provisioning
+// failure, and, once the gateway is connected, an outage or the first start.
 func (b *Bridge) noticeUp(ctx context.Context, binding config.Binding, g store.Guild) {
 	b.mu.Lock()
-	prev := b.notices[g.GuildID]
-	if prev == noticeDown && b.health.GatewayState != gateway.StateConnected {
-		b.mu.Unlock()
-		return
+	n := b.noticesOf(g.GuildID)
+	connected := b.health.GatewayState == gateway.StateConnected
+	var texts []string
+	if n.failed {
+		n.failed = false
+		texts = append(texts, "🟢 Provisioning succeeded.")
 	}
-	b.notices[g.GuildID] = noticeUp
+	if connected && n.outage {
+		n.outage = false
+		texts = append(texts, "🟢 Reconnected to Discord; Kandev updates resume.")
+	}
+	if connected && !n.announced {
+		n.announced = true
+		texts = append(texts, fmt.Sprintf("🟢 Connected: this server mirrors Kandev workspace `%s`.", binding.WorkspaceID))
+	}
 	b.mu.Unlock()
-	var text string
-	switch prev {
-	case noticeUp:
-		return
-	case noticeDown:
-		text = "🟢 Reconnected to Discord; Kandev updates resume."
-	case noticeFailed:
-		text = fmt.Sprintf("🟢 Provisioning succeeded; this server mirrors Kandev workspace `%s` again.", binding.WorkspaceID)
-	default:
-		text = fmt.Sprintf("🟢 Connected: this server mirrors Kandev workspace `%s`.", binding.WorkspaceID)
+	for _, text := range texts {
+		log.Printf("discord: server %s: %s", binding.GuildID, text)
+		b.postStatus(ctx, g, text)
 	}
-	log.Printf("discord: server %s provisioned for workspace %s", binding.GuildID, binding.WorkspaceID)
-	b.postStatus(ctx, g, text)
 }
 
 // noticeProvisioningFailed announces the first failure of a streak, in the
@@ -53,10 +64,11 @@ func (b *Bridge) noticeProvisioningFailed(ctx context.Context, binding config.Bi
 		return // READY has not arrived; provisioning simply waits for it
 	}
 	b.mu.Lock()
-	prev := b.notices[binding.GuildID]
-	b.notices[binding.GuildID] = noticeFailed
+	n := b.noticesOf(binding.GuildID)
+	first := !n.failed
+	n.failed = true
 	b.mu.Unlock()
-	if prev == noticeFailed {
+	if !first {
 		return
 	}
 	g, ok := b.guild(binding.WorkspaceID)
@@ -88,8 +100,8 @@ func (b *Bridge) gatewayChanged(prev string, s gateway.State) {
 	}
 }
 
-// noticeDown posts text to every guild whose last notice was "up", unless
-// the gateway is connected again.
+// noticeDown posts text to every announced guild without a pending outage
+// notice, unless the gateway is connected again.
 func (b *Bridge) noticeDown(text string) {
 	b.mu.Lock()
 	if b.health.GatewayState == gateway.StateConnected {
@@ -98,8 +110,8 @@ func (b *Bridge) noticeDown(text string) {
 	}
 	var targets []store.Guild
 	for _, g := range b.guilds {
-		if b.notices[g.GuildID] == noticeUp {
-			b.notices[g.GuildID] = noticeDown
+		if n := b.noticesOf(g.GuildID); n.announced && !n.outage {
+			n.outage = true
 			targets = append(targets, g)
 		}
 	}

@@ -60,7 +60,7 @@ func observe(level, _ int, format string, args ...any) {
 		sup.identifySent()
 		return
 	case format == reidentifyFormat:
-		if !sup.mayIdentify() {
+		if !sup.reserveIdentify() {
 			refuseReidentify(sess)
 		}
 		return

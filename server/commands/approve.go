@@ -375,8 +375,9 @@ func (c *call) markPrompt(taskID, interactionID, outcome string) {
 }
 
 // markStep resolves the posted step approval prompt of the approved
-// transition and forgets it; a prompt for another transition, or one whose
-// buttons could not be removed, is left to the sync.
+// transition at the approved state (ResourceVersion) and forgets it; a
+// prompt for another transition or a later visit, or one whose buttons
+// could not be removed, is left to the sync.
 func (c *call) markStep(taskID string, approval pluginsdk.StepApproval, outcome string) {
 	c.OnTask(taskID, func(ctx context.Context) {
 		rec, found, err := c.Store.Channel(ctx, taskID)
@@ -384,7 +385,8 @@ func (c *call) markStep(taskID string, approval pluginsdk.StepApproval, outcome 
 			return
 		}
 		step, posted, err := c.Store.StepApproval(ctx, taskID)
-		if err != nil || !posted || step.SessionID != approval.SessionID || step.FromStepID != approval.FromStepID || step.ToStepID != approval.ToStepID {
+		if err != nil || !posted || step.SessionID != approval.SessionID || step.FromStepID != approval.FromStepID ||
+			step.ToStepID != approval.ToStepID || step.ResourceVersion != approval.ResourceVersion {
 			return
 		}
 		if err := c.poster().Resolve(ctx, rec.ChannelID, step.MessageID, outcome); err != nil {

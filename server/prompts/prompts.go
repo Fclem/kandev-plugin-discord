@@ -7,7 +7,6 @@ package prompts
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -121,7 +120,9 @@ func (p *Poster) syncInteractions(ctx context.Context, task *pluginsdk.Task, rec
 		if slices.ContainsFunc(stored.Items, func(pr store.Prompt) bool { return pr.InteractionID == it.ID }) {
 			continue
 		}
-		msg, err := p.API.MessageSend(ctx, rec.ChannelID, p.render(task, it))
+		// The nonce makes a retry after a lost reply return the first post
+		// instead of leaving an unrecorded duplicate with live buttons.
+		msg, err := p.API.MessageSendOnce(ctx, rec.ChannelID, p.render(task, it), discordapi.Nonce(rec.ChannelID, "perm", it.ID))
 		if err != nil {
 			return fmt.Errorf("posting prompt: %w", err)
 		}
@@ -348,7 +349,7 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 		// Same transition at a new approval state (a later visit, or a
 		// session update): give the prompt a fresh button, silently, so the
 		// old one can no longer approve it.
-		nonce := newNonce()
+		nonce := stepNonce(rec.ChannelID, *awaiting)[:8]
 		buttons := stepButtons(*awaiting, nonce)
 		if _, err := p.API.MessageEdit(ctx, &discordgo.MessageEdit{Channel: rec.ChannelID, ID: current.MessageID, Components: &buttons}); err != nil {
 			if !discordapi.IsGone(err) {
@@ -377,14 +378,14 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 		text += fmt.Sprintf(" → **%s**", awaiting.ToStepName)
 	}
 	text += ". Approve to move on, or post a message to request changes."
-	nonce := newNonce()
-	msg, err := p.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Content: text, Components: stepButtons(*awaiting, nonce)})
+	nonce := stepNonce(rec.ChannelID, *awaiting)
+	msg, err := p.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Content: text, Components: stepButtons(*awaiting, nonce[:8])}, nonce)
 	if err != nil {
 		return fmt.Errorf("posting step approval: %w", err)
 	}
 	return p.Store.PutStepApproval(ctx, task.ID, store.StepApproval{
 		SessionID: awaiting.SessionID, FromStepID: awaiting.FromStepID, ToStepID: awaiting.ToStepID,
-		ResourceVersion: awaiting.ResourceVersion, Nonce: nonce, MessageID: msg.ID, PostedAt: p.Now(),
+		ResourceVersion: awaiting.ResourceVersion, Nonce: nonce[:8], MessageID: msg.ID, PostedAt: p.Now(),
 	})
 }
 
@@ -395,10 +396,12 @@ func stepButtons(a pluginsdk.StepApproval, nonce string) []discordgo.MessageComp
 	}})
 }
 
-func newNonce() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+// stepNonce identifies one approval state's prompt in one channel. Its
+// prefix is the button's prompt nonce and the whole the message nonce, so a
+// post retried after a lost reply returns the same prompt with the same
+// button.
+func stepNonce(channelID string, a pluginsdk.StepApproval) string {
+	return discordapi.Nonce(channelID, "step", a.SessionID, a.FromStepID, a.ToStepID, a.ResourceVersion)
 }
 
 func truncate(s string, n int) string {

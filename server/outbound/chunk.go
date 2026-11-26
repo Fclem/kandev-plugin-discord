@@ -4,6 +4,7 @@
 package outbound
 
 import (
+	"cmp"
 	"strings"
 	"unicode/utf8"
 )
@@ -70,6 +71,12 @@ func (c *chunker) add(line string) {
 			after = fenceOpener(line)
 		} else {
 			after = ""
+		}
+		// A delimiter line is never split (a piece would ship an opener
+		// without its closer): one this long, which Discord would not render
+		// as a delimiter anyway, is reduced to a bare one.
+		if len(line) > c.limit/2 {
+			line = cmp.Or(after, "```") + "\n"
 		}
 	}
 	need := len(line) + c.reserve(after)

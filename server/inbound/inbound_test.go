@@ -130,7 +130,7 @@ func TestCatchUpDeliversRecentAndRejectsStaleMessages(t *testing.T) {
 	bot := f.api.AddMessage(&discordgo.Message{ID: idAt(now.Add(-20*time.Minute), 1), ChannelID: f.rec.ChannelID, Content: "card", Author: f.api.BotUser})
 	recent := f.api.AddMessage(f.msg(now.Add(-5*time.Minute), 1, "op", "still relevant"))
 
-	rec, err := f.h.CatchUp(context.Background(), f.rec)
+	rec, err := f.h.CatchUp(context.Background(), f.rec, "")
 	require.NoError(t, err)
 	assert.Equal(t, recent.ID, rec.InboundCursor)
 	assert.Equal(t, []kandev.SentMessage{{TaskID: "t1", Text: "Alice (Discord): still relevant"}}, f.host.Sent)
@@ -139,7 +139,7 @@ func TestCatchUpDeliversRecentAndRejectsStaleMessages(t *testing.T) {
 	assert.Equal(t, []string{ReactDelivered}, f.api.ReactionsOn(recent.ID))
 
 	f.rec = rec
-	again, err := f.h.CatchUp(context.Background(), f.rec)
+	again, err := f.h.CatchUp(context.Background(), f.rec, "")
 	require.NoError(t, err)
 	assert.Equal(t, rec.InboundCursor, again.InboundCursor)
 	assert.Len(t, f.host.Sent, 1)
@@ -149,14 +149,14 @@ func TestUnknownAuthorityKeepsTheMessageForALaterCatchUp(t *testing.T) {
 	f := newFixture(t)
 	m := f.api.AddMessage(f.msg(now.Add(-time.Minute), 1, "op", "deploy"))
 	f.authErr = errors.New("discord unavailable")
-	rec, err := f.h.CatchUp(context.Background(), f.rec)
+	rec, err := f.h.CatchUp(context.Background(), f.rec, "")
 	require.Error(t, err)
 	assert.Equal(t, f.rec.InboundCursor, rec.InboundCursor, "cursor does not pass an undecided message")
 	assert.Empty(t, f.host.Sent)
 	assert.Empty(t, f.api.ReactionsOn(m.ID))
 
 	f.authErr = nil
-	rec, err = f.h.CatchUp(context.Background(), rec)
+	rec, err = f.h.CatchUp(context.Background(), rec, "")
 	require.NoError(t, err)
 	assert.Equal(t, m.ID, rec.InboundCursor)
 	assert.Len(t, f.host.Sent, 1)

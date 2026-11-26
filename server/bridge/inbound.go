@@ -70,7 +70,7 @@ func (b *Bridge) onMessageCreate(_ context.Context, m *discordgo.MessageCreate) 
 		}
 		b.onTaskAndWait(ix.TaskID, func(ctx context.Context) {
 			rec, guild, ok, err := b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
-			if err == nil && ok && b.ensureCaughtUp(ctx, rec, guild) {
+			if err == nil && ok && b.ensureCaughtUp(ctx, rec, guild, msg.ID) {
 				rec, _, ok, err = b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
 				if err == nil && ok {
 					_, err = b.inboundHandler(guild).Handle(ctx, rec, msg)
@@ -105,16 +105,17 @@ func (b *Bridge) activeRecord(ctx context.Context, taskID, channelID, guildID st
 }
 
 // ensureCaughtUp delivers what a channel received while the bridge was
-// offline, once per READY, before any live message of that channel. It
-// reports whether live delivery may proceed.
-func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild store.Guild) bool {
+// offline, once per READY, before any live message of that channel; until
+// is that live message (catch-up stops before it), or "". It reports
+// whether live delivery may proceed.
+func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild store.Guild, until string) bool {
 	b.mu.Lock()
 	gen := b.readyGen
 	b.mu.Unlock()
 	if !b.needsCatchUp(rec.ChannelID) {
 		return true
 	}
-	if _, err := b.inboundHandler(guild).CatchUp(ctx, rec); err != nil {
+	if _, err := b.inboundHandler(guild).CatchUp(ctx, rec, until); err != nil {
 		log.Printf("discord: catching up channel of task %s: %v", rec.TaskID, err)
 		b.retryCatchUp(rec.ChannelID)
 		return false
@@ -172,7 +173,7 @@ func (b *Bridge) catchUp(taskID, channelID string) {
 				log.Printf("discord: catching up channel of task %s: %v", taskID, err)
 				b.retryCatchUp(channelID)
 			case ok:
-				b.ensureCaughtUp(ctx, rec, guild)
+				b.ensureCaughtUp(ctx, rec, guild, "")
 			}
 		})
 	})

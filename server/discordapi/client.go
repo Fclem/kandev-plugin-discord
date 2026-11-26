@@ -170,16 +170,21 @@ func (c *Client) MessageSend(ctx context.Context, channelID string, data *discor
 }
 
 // sendOnce is a message create with Discord's enforce_nonce, which
-// discordgo's MessageSend lacks.
+// discordgo's MessageSend lacks. Files are not supported.
 type sendOnce struct {
-	Content         string                            `json:"content"`
-	AllowedMentions *discordgo.MessageAllowedMentions `json:"allowed_mentions"`
-	Nonce           string                            `json:"nonce"`
-	EnforceNonce    bool                              `json:"enforce_nonce"`
+	*discordgo.MessageSend
+	Nonce        string `json:"nonce"`
+	EnforceNonce bool   `json:"enforce_nonce"`
 }
 
-func (c *Client) MessageSendOnce(ctx context.Context, channelID, content, nonce string) (m *discordgo.Message, err error) {
-	body := sendOnce{Content: content, AllowedMentions: NoMentions(), Nonce: nonce, EnforceNonce: true}
+func (c *Client) MessageSendOnce(ctx context.Context, channelID string, data *discordgo.MessageSend, nonce string) (m *discordgo.Message, err error) {
+	data.AllowedMentions = NoMentions()
+	for _, e := range data.Embeds {
+		if e.Type == "" {
+			e.Type = discordgo.EmbedTypeRich
+		}
+	}
+	body := sendOnce{MessageSend: data, Nonce: nonce, EnforceNonce: true}
 	endpoint := discordgo.EndpointChannelMessages(channelID)
 	err = c.do(ctx, func(o discordgo.RequestOption) error {
 		raw, err := c.s.RequestWithBucketID(http.MethodPost, endpoint, body, endpoint, o, noRetry)

@@ -49,7 +49,10 @@ func (b *Bridge) channelManager() *channels.Manager {
 		CategoryLock: &b.categoryMu, CurrentGuild: b.guild,
 		SaveGuild: b.setGuild, Note: b.postStatus,
 		SaveIntent: func(ctx context.Context, rec store.Channel) error {
-			return b.st.PutChannel(ctx, rec, rec.ChannelID)
+			if err := b.st.PutChannel(ctx, rec, rec.ChannelID); err != nil {
+				return err
+			}
+			return b.st.PutCreating(ctx, store.Index{TaskID: rec.TaskID, WorkspaceID: rec.WorkspaceID, GuildID: rec.GuildID})
 		},
 		Owner: func(ctx context.Context, channelID string) (string, bool, error) {
 			ix, found, err := b.st.ChannelIndex(ctx, channelID)
@@ -101,10 +104,17 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	input := func(r store.Channel) channels.Input {
 		return channels.Input{Task: task, Rec: r, Guild: g, ParentIdentifier: b.parentIdentifier(ctx, task), Now: b.now()}
 	}
-	if task != nil && rec.Status == store.StatusActive && !channels.WantOpen(b.cfg, task) {
+	switch {
+	case task != nil && rec.Status == store.StatusActive && !channels.WantOpen(b.cfg, task):
 		var ok bool
 		if rec, ok = b.flushBeforeClose(ctx, mgr, task, input(rec)); !ok {
 			b.kickAfter(taskID, flushRetry)
+			return
+		}
+	case !rec.CloseRequestedAt.IsZero() && channels.WantOpen(b.cfg, task):
+		rec.CloseRequestedAt = time.Time{} // reopened before the close happened
+		if err := b.st.PutChannel(ctx, rec, rec.ChannelID); err != nil {
+			log.Printf("discord: saving channel record of task %s: %v", taskID, err)
 			return
 		}
 	}
@@ -121,7 +131,13 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 			// A new channel: prompts posted in the old one are unreachable.
 			b.forgetPrompts(ctx, taskID)
 		}
+		if creating(rec.Status) && res.Rec.Status != store.StatusCreating {
+			if err := b.st.DeleteCreating(ctx, taskID); err != nil {
+				log.Printf("discord: task %s: clearing the creation inventory: %v", taskID, err)
+			}
+		}
 	}
+	b.ensureIndexed(ctx, res.Rec)
 	if res.RetryAfter > 0 {
 		b.kickAfter(taskID, res.RetryAfter)
 	}
@@ -134,10 +150,12 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 			b.kickAfter(taskID, flushRetry)
 		}
 	}
-	if task == nil || res.Rec.Status != store.StatusActive {
-		return
+	if task == nil || res.Rec.Status != store.StatusActive || !channels.WantOpen(b.cfg, task) {
+		return // an adopted channel of a closing task closes on the next sync
 	}
-	if res.Rec.RolesKey != channels.RolesKey(g) {
+	b.authority.RLock()
+	defer b.authority.RUnlock()
+	if cur, ok := b.guild(workspaceID); !ok || res.Rec.RolesKey != channels.RolesKey(cur) {
 		b.kickAfter(taskID, flushRetry) // a former role may still read the channel
 		return
 	}
@@ -145,17 +163,31 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 }
 
 // closeHoldMax bounds how long a closing task's channel stays open waiting
-// for a session that keeps running.
+// for a session that keeps running, from the first close attempt.
 const closeHoldMax = 30 * time.Minute
 
 // flushBeforeClose posts a closing task's final answer and status under
-// converged permissions. It reports false when the close must wait: the
-// overwrites or the flush failed transiently, or a session still runs (its
-// last message may still grow), and the next sync retries. A flush Discord
-// forbids (the bot lost access) cannot succeed later, and a session still
-// running closeHoldMax after the task closed is not waited for longer, so
-// the close goes ahead.
+// converged permissions, fenced against role changes. It reports false
+// when the close must wait: the overwrites or the flush failed
+// transiently, or a session still runs (its last message may still grow),
+// and the next sync retries. A flush Discord forbids (the bot lost access)
+// cannot succeed later, and a session still running closeHoldMax after the
+// first close attempt is not waited for longer, so the close goes ahead.
 func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, task *pluginsdk.Task, in channels.Input) (store.Channel, bool) {
+	if in.Rec.CloseRequestedAt.IsZero() {
+		in.Rec.CloseRequestedAt = b.now()
+		if err := b.st.PutChannel(ctx, in.Rec, in.Rec.ChannelID); err != nil {
+			log.Printf("discord: saving channel record of task %s: %v", task.ID, err)
+			return in.Rec, false
+		}
+	}
+	b.authority.RLock()
+	defer b.authority.RUnlock()
+	g, ok := b.guild(task.WorkspaceID)
+	if !ok {
+		return in.Rec, false
+	}
+	in.Guild = g
 	res, err := mgr.Converge(ctx, in, false)
 	if res.Changed {
 		if err := b.st.PutChannel(ctx, res.Rec, in.Rec.ChannelID); err != nil {
@@ -177,7 +209,7 @@ func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, ta
 	case discordapi.IsForbidden(err):
 		log.Printf("discord: task %s: closing without its final output: %v", task.ID, err)
 		return next, true
-	case errors.Is(err, errSessionRunning) && b.now().Sub(closedAt(task)) > closeHoldMax:
+	case errors.Is(err, errSessionRunning) && b.now().Sub(next.CloseRequestedAt) > closeHoldMax:
 		log.Printf("discord: task %s: closing although a session still runs", task.ID)
 		return next, true
 	}
@@ -185,18 +217,38 @@ func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, ta
 	return next, false
 }
 
-// closedAt is when a task stopped wanting a channel, as well as Kandev
-// says: completion, archive, or the last update.
-func closedAt(task *pluginsdk.Task) time.Time {
-	for _, s := range []*string{task.ArchivedAt, task.CompletedAt, &task.UpdatedAt} {
-		if s == nil {
-			continue
-		}
-		if t, err := time.Parse(time.RFC3339Nano, *s); err == nil {
-			return t
-		}
+// creating reports whether a record status leads to channel creation, the
+// path that may have listed the task in the creation inventory.
+func creating(status string) bool {
+	switch status {
+	case "", store.StatusDeleted, store.StatusCapacityBlocked, store.StatusCreating, store.StatusFailed:
+		return true
 	}
-	return time.Time{}
+	return false
+}
+
+// ensureIndexed repairs a missing or stale reverse index entry of a
+// channel the record owns (its write may have failed while the record's
+// succeeded), then catches the channel up: messages posted while it was
+// unroutable are still in its history.
+func (b *Bridge) ensureIndexed(ctx context.Context, rec store.Channel) {
+	if rec.ChannelID == "" || (rec.Status != store.StatusActive && rec.Status != store.StatusArchived) {
+		return
+	}
+	ix, found, err := b.st.ChannelIndex(ctx, rec.ChannelID)
+	if err != nil || (found && ix == store.Index{TaskID: rec.TaskID, WorkspaceID: rec.WorkspaceID, GuildID: rec.GuildID}) {
+		return
+	}
+	if err := b.st.PutChannel(ctx, rec, rec.ChannelID); err != nil {
+		log.Printf("discord: task %s: repairing the channel index: %v", rec.TaskID, err)
+		return
+	}
+	if rec.Status == store.StatusActive {
+		b.mu.Lock()
+		b.caughtUp[rec.ChannelID] = -1
+		b.mu.Unlock()
+		b.catchUp(rec.TaskID, rec.ChannelID)
+	}
 }
 
 // retire detaches a record from a guild the workspace is no longer bound

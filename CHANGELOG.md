@@ -101,3 +101,23 @@
 - `#kandev-status` no longer announces a reconnect while the gateway is
   still down.
 - Messages split at a code fence never exceed 2000 characters.
+
+### Fixed (adversarial review round 4)
+
+- A post that starts after a role change is published can no longer reach
+  the former role.
+- The gateway never resumes a session Discord invalidated; a stalled
+  handshake times out and a token halt interrupts it; an IDENTIFY is only
+  sent with budget reserved (an unwritable counter refuses).
+- Channels created for tasks that were archived or deleted before the
+  creation was recorded are closed reliably.
+- A lost channel-index write is repaired and its messages caught up.
+- Buttons and commands in an archived channel change nothing.
+- An answer still being written when a turn starts or ends mid-sync is not
+  posted early; a first live message is not mistaken for missed history.
+- The close of a task with a stuck session waits at most 30 minutes from
+  the first attempt, whatever else changes on the task.
+- Approving one visit of a step never clears the next visit's prompt.
+- Cards and prompts are not duplicated by a retry after a lost reply.
+- `#kandev-status` keeps gateway outages and provisioning failures apart.
+- Code blocks are never split across their delimiter line.

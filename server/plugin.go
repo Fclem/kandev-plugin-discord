@@ -6,6 +6,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/kdlbs/kandev/pluginsdk"
 
 	"kandev-plugin-discord/server/bridge"
@@ -87,7 +88,8 @@ func (p *discordPlugin) runBridge(h pluginsdk.Host) {
 	p.mu.Lock()
 	p.bridge = b
 	p.mu.Unlock()
-	final := b.Run(sess)
+	// REST stays on sess; each gateway connection gets a fresh session.
+	final := b.Run(func() *discordgo.Session { return discordapi.NewSession(cfg.BotToken) })
 	log.Printf("discord: gateway stopped: %s", final.Name)
 }
 

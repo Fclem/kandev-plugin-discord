@@ -21,7 +21,7 @@ func (c *call) button(ctx context.Context) {
 		c.reply(ctx, "This prompt is no longer attached to a task channel.")
 		return
 	}
-	if !c.requireOperator(ctx) {
+	if !c.requireOperator(ctx) || !c.requireOpen(ctx, taskID) {
 		return
 	}
 	if interactionID, index, ok := prompts.ParsePermissionButton(customID); ok {

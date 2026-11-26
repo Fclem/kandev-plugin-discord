@@ -43,13 +43,14 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 		Opts: outbound.Options{MirrorUserMessages: b.cfg.MirrorUserMessages, PostToolActivity: b.cfg.PostToolActivity},
 		Save: func(ctx context.Context, r store.Channel) error { return b.st.PutChannel(ctx, r, r.ChannelID) },
 	}
-	next, retry, err := mirror.Sync(ctx, outbound.Input{
+	res, err := mirror.Sync(ctx, outbound.Input{
 		Task: task, Rec: rec, Sessions: sessions, Now: b.now(),
 		Card: outbound.CardInput{
 			Task: task, StepName: b.stepName(ctx, task), Sessions: sessions,
 			Queued: b.queued(sessions), Pending: pending, URL: b.cfg.TaskURL(task.ID),
 		},
 	})
+	next, retry := res.Rec, res.Retry
 	if !reflect.DeepEqual(next, rec) {
 		if err := b.st.PutChannel(ctx, next, next.ChannelID); err != nil {
 			log.Printf("discord: task %s: saving channel record: %v", task.ID, err)
@@ -80,7 +81,7 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 	if b.cfg.LiveUpdateInterval > 0 && anyRunning(sessions) {
 		b.kickAfter(task.ID, b.cfg.LiveUpdateInterval)
 	}
-	if flushErr == nil && anyRunning(sessions) {
+	if flushErr == nil && (res.Held || anyRunning(sessions)) {
 		// The newest agent message may still be growing (it was held
 		// back); output is complete only once every session stopped.
 		flushErr = errSessionRunning

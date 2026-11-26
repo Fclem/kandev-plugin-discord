@@ -39,6 +39,7 @@ const (
 	keyHealth       = "health"
 	keyIdentify     = "identify_budget"
 	indexPrefix     = "channel:"
+	creatingPrefix  = "creating:"
 )
 
 // Channel record statuses (system design "State machine").
@@ -90,28 +91,34 @@ type Creation struct {
 
 // Channel is task/<id>/channel: the task's Discord channel and sync state.
 type Channel struct {
-	TaskID          string            `json:"task_id"`
-	WorkspaceID     string            `json:"workspace_id"`
-	GuildID         string            `json:"guild_id"`
-	ChannelID       string            `json:"channel_id,omitempty"`
-	Status          string            `json:"status"`
-	SyncedTitle     string            `json:"synced_title,omitempty"`
-	SyncedTopic     string            `json:"synced_topic,omitempty"`
-	RolesKey        string            `json:"roles_key,omitempty"`
-	LastRenamedAt   time.Time         `json:"last_renamed_at,omitzero"`
-	CardMessageID   string            `json:"card_message_id,omitempty"`
-	CardHash        string            `json:"card_hash,omitempty"`
-	CardPinned      bool              `json:"card_pinned,omitempty"`
+	TaskID        string    `json:"task_id"`
+	WorkspaceID   string    `json:"workspace_id"`
+	GuildID       string    `json:"guild_id"`
+	ChannelID     string    `json:"channel_id,omitempty"`
+	Status        string    `json:"status"`
+	SyncedTitle   string    `json:"synced_title,omitempty"`
+	SyncedTopic   string    `json:"synced_topic,omitempty"`
+	RolesKey      string    `json:"roles_key,omitempty"`
+	LastRenamedAt time.Time `json:"last_renamed_at,omitzero"`
+	CardMessageID string    `json:"card_message_id,omitempty"`
+	CardHash      string    `json:"card_hash,omitempty"`
+	CardPinned    bool      `json:"card_pinned,omitempty"`
+	// CardPosts counts cards posted to the channel; it varies the card
+	// nonce between a deleted card and its replacement.
+	CardPosts       int               `json:"card_posts,omitempty"`
 	CardEditedAt    time.Time         `json:"card_edited_at,omitzero"`
 	OutboundCursor  Cursor            `json:"outbound_cursor"`
 	InboundCursor   string            `json:"inbound_cursor,omitempty"`
 	InboundInflight string            `json:"inbound_inflight,omitempty"`
 	SessionStates   map[string]string `json:"session_states,omitempty"`
-	ClosedAt        time.Time         `json:"closed_at,omitzero"`
-	DeleteAfter     time.Time         `json:"delete_after,omitzero"`
-	LastError       string            `json:"last_error,omitempty"`
-	Creation        *Creation         `json:"creation,omitempty"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	// CloseRequestedAt is the first attempt to close the active channel; it
+	// bounds how long a running session may hold the close.
+	CloseRequestedAt time.Time `json:"close_requested_at,omitzero"`
+	ClosedAt         time.Time `json:"closed_at,omitzero"`
+	DeleteAfter      time.Time `json:"delete_after,omitzero"`
+	LastError        string    `json:"last_error,omitempty"`
+	Creation         *Creation `json:"creation,omitempty"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // Prompt is one posted interaction prompt.
@@ -256,15 +263,35 @@ func (s *Store) ChannelIndex(ctx context.Context, channelID string) (Index, bool
 	return ix, ok, err
 }
 
+// PutCreating lists a task whose channel creation is not yet recorded, so
+// the reconcile finds it even when the task itself disappears.
+func (s *Store) PutCreating(ctx context.Context, ix Index) error {
+	return s.put(ctx, scopeInstance, "", creatingPrefix+ix.TaskID, ix)
+}
+
+// DeleteCreating removes a task from the creation inventory.
+func (s *Store) DeleteCreating(ctx context.Context, taskID string) error {
+	return s.h.DeleteState(ctx, scopeInstance, "", creatingPrefix+taskID)
+}
+
+// CreatingTasks lists the creation inventory by task ID.
+func (s *Store) CreatingTasks(ctx context.Context) (map[string]Index, error) {
+	return s.listIndex(ctx, creatingPrefix)
+}
+
 // IndexedChannels lists every indexed channel ID with its task.
 func (s *Store) IndexedChannels(ctx context.Context) (map[string]Index, error) {
+	return s.listIndex(ctx, indexPrefix)
+}
+
+func (s *Store) listIndex(ctx context.Context, prefix string) (map[string]Index, error) {
 	entries, err := s.h.ListState(ctx, scopeInstance, "")
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]Index{}
 	for _, e := range entries {
-		id, ok := strings.CutPrefix(e.Key, indexPrefix)
+		id, ok := strings.CutPrefix(e.Key, prefix)
 		if !ok {
 			continue
 		}

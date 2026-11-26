@@ -7,9 +7,12 @@ package discordapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -33,10 +36,11 @@ type API interface {
 	// the order Discord returns them (newest first).
 	ChannelMessages(ctx context.Context, channelID string, limit int, afterID string) ([]*discordgo.Message, error)
 	MessageSend(ctx context.Context, channelID string, data *discordgo.MessageSend) (*discordgo.Message, error)
-	// MessageSendOnce posts text with an enforced nonce: within Discord's
-	// nonce window, a repeated send with the same nonce returns the first
-	// message instead of posting again. nonce is at most 25 characters.
-	MessageSendOnce(ctx context.Context, channelID, content, nonce string) (*discordgo.Message, error)
+	// MessageSendOnce posts with an enforced nonce: within Discord's nonce
+	// window (a few minutes), a repeated send with the same nonce returns
+	// the first message instead of posting again. nonce is at most 25
+	// characters.
+	MessageSendOnce(ctx context.Context, channelID string, data *discordgo.MessageSend, nonce string) (*discordgo.Message, error)
 	MessageEdit(ctx context.Context, data *discordgo.MessageEdit) (*discordgo.Message, error)
 	ReactionAdd(ctx context.Context, channelID, messageID, emoji string) error
 	MessagePin(ctx context.Context, channelID, messageID string) error
@@ -108,4 +112,11 @@ func IsForbidden(err error) bool { return Status(err) == http.StatusForbidden }
 // text can never ping @everyone, roles, or users.
 func NoMentions() *discordgo.MessageAllowedMentions {
 	return &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}}
+}
+
+// Nonce derives a message nonce (24 hex characters, under Discord's 25)
+// from the parts identifying one logical post.
+func Nonce(parts ...string) string {
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(sum[:12])
 }

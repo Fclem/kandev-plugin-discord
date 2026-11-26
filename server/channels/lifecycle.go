@@ -128,9 +128,11 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 	return Result{Rec: rec}, nil
 }
 
-// abandon settles a creation whose task closed before its record was
-// written: a channel Discord made for it is adopted and closed like any
-// other (archived or deleted), so no unrouted channel stays writable.
+// abandon settles a creation whose task closed (or vanished) before its
+// record was written: a channel Discord made for it is adopted, and the
+// adoption is saved before anything else, so the next sync closes it like
+// any other channel (archived or deleted) and a failure while closing is
+// recovered from the record. No unrouted channel stays writable.
 func (m *Manager) abandon(ctx context.Context, in Input) (Result, error) {
 	rec := in.Rec
 	var ch *discordgo.Channel
@@ -151,12 +153,10 @@ func (m *Manager) abandon(ctx context.Context, in Input) (Result, error) {
 	rec.ChannelID, rec.Status, rec.RolesKey = ch.ID, store.StatusActive, made.RolesKey
 	rec.SyncedTitle, rec.SyncedTopic = made.Title, made.Topic
 	if rec.OutboundCursor.CreatedAt == "" {
-		// Should the close fail and leave it open, mirror nothing old.
+		// Nothing was ever mirrored there; the close posts nothing old.
 		rec.OutboundCursor = store.Cursor{CreatedAt: in.Now.UTC().Format(time.RFC3339Nano)}
 	}
-	closed, err := m.close(ctx, Input{Task: in.Task, Rec: rec, Guild: in.Guild, ParentIdentifier: in.ParentIdentifier, Now: in.Now})
-	closed.Changed = true // adopted at least; a failed close is retried
-	return closed, err
+	return Result{Rec: rec, Changed: true, RetryAfter: time.Second}, nil
 }
 
 // MarkDeleted records that Discord deleted the channel.
@@ -414,7 +414,7 @@ func (m *Manager) move(ctx context.Context, in Input, archive bool) (Result, err
 		}
 		return Result{Rec: rec}, fmt.Errorf("%s channel: %w", verb, err)
 	}
-	rec.RolesKey, rec.UpdatedAt = RolesKey(in.Guild), in.Now
+	rec.RolesKey, rec.UpdatedAt, rec.CloseRequestedAt = RolesKey(in.Guild), in.Now, time.Time{}
 	if !archive {
 		rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusActive, time.Time{}, time.Time{}
 		return Result{Rec: rec, Changed: true}, nil

@@ -290,6 +290,18 @@ Wave 7:
   closed; archived channels resolve their prompts with retries; outage
   notices are not cleared by REST provisioning; the chunker reserves the
   closing fence of a line that opens one.
+- Adversarial review round 4 (15 findings) fixed: posts hold a read fence
+  that role publication takes for writing; every gateway attempt is a fresh
+  session (no resume of invalidated sessions) with an abortable, bounded
+  handshake; identifies are reserved before sending, released when unsent;
+  abandoned creations are adopted and saved before closing, and a creation
+  inventory covers tasks deleted meanwhile; the reverse index is verified
+  each sync and repaired with a catch-up; buttons and mutating commands
+  need the active channel; sessions are read before and after messages;
+  catch-up stops before the live message that triggered it; the close hold
+  is bounded from a persisted first attempt; `markStep` matches the
+  ResourceVersion; cards and prompts carry nonces; outage and provisioning
+  notices are tracked apart; over-long fence lines are never split.
 
 ## Risks
 
@@ -311,9 +323,25 @@ Wave 7:
   grant, and are audited.
 - **Event loss.** Cursor pulls and the 5-minute reconcile bound the delay.
 - **Identify budget.** A persisted counter refuses to connect after 900
-  identifies in 24 h.
+  identifies in 24 h. A reservation is written before every IDENTIFY
+  (including an invalid-session re-identify) and taken back when the attempt
+  fails before sending it; an unwritable counter refuses.
+- **No gateway resume.** Unlike the system design's "resume with
+  `resume_gateway_url`", each connection attempt uses a fresh discordgo
+  session and IDENTIFYs: discordgo keeps a session Discord may have
+  invalidated (close 4007/4009) and offers no reset, and the READY
+  reconcile already recovers missed events. Each reconnect costs one
+  identify from the budget.
+- **Duplicate posts.** Message parts, cards, and prompts carry an enforced
+  nonce, so a retry within Discord's nonce window (a few minutes) never
+  duplicates them. A crash between Discord accepting a post and the record
+  write, followed by an outage longer than that window, can post that one
+  item twice. Accepted: Discord offers no durable idempotency, and the
+  alternative (matching earlier posts by content) can drop messages.
 - **Streaming rows.** An agent message row can grow while its turn runs, so a
-  mid-turn pull holds back the newest agent message of a running session.
+  mid-turn pull holds back the newest agent message of a session that was
+  running (or changed state) in the session reads before and after the
+  message read.
 
 ## Open Questions
 

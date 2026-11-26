@@ -55,13 +55,21 @@ func TestChunkHardSplitsLongLinesOnRuneBoundaries(t *testing.T) {
 	}
 }
 
-func TestChunksNeverExceedTheLimitAroundFenceBoundaries(t *testing.T) {
+func TestChunksFitAndBalanceAroundFenceBoundaries(t *testing.T) {
 	for n := 1980; n <= 2010; n++ {
 		x := strings.Repeat("x", n)
 		for _, text := range []string{"```" + x, "```" + x + "\nmore", "```go\n" + x + "\n```", "a\n```" + x, "```\n" + x,
-			"```go\n" + x, "y\n```go\n" + x + "\n```\n" + x, "```go\n" + x + x + "\n```"} {
+			"```go\n" + x, "y\n```go\n" + x + "\n```\n" + x, "```go\n" + x + x + "\n```",
+			"```go" + strings.Repeat(" ", n) + "\nbody\n```"} {
 			for _, c := range Chunk(text, 2000) {
 				require.LessOrEqual(t, len(c), 2000, "n=%d", n)
+				delimiters := 0
+				for _, line := range strings.Split(c, "\n") {
+					if isFence(line) {
+						delimiters++
+					}
+				}
+				require.Zero(t, delimiters%2, "n=%d: every opened block is closed in its chunk: %q…", n, c[:min(len(c), 40)])
 			}
 		}
 	}
@@ -157,13 +165,19 @@ func newMirror(t *testing.T) *mirrorFixture {
 
 func (f *mirrorFixture) sync(t *testing.T, sessions []pluginsdk.Session, now time.Time) time.Duration {
 	t.Helper()
-	rec, retry, err := f.m.Sync(context.Background(), Input{
+	res, err := f.m.Sync(context.Background(), Input{
 		Task: f.task, Rec: f.rec, Sessions: sessions, Now: now,
 		Card: CardInput{Task: f.task, Sessions: sessions},
 	})
 	require.NoError(t, err)
-	f.rec = rec
-	return retry
+	f.rec = res.Rec
+	return res.Retry
+}
+
+// try syncs rec without sessions and returns the outcome, errors included.
+func (f *mirrorFixture) try(rec store.Channel) (store.Channel, error) {
+	res, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	return res.Rec, err
 }
 
 func (f *mirrorFixture) texts() []string {
@@ -174,6 +188,24 @@ func (f *mirrorFixture) texts() []string {
 		}
 	}
 	return out
+}
+
+func TestTurnStartingDuringTheReadHoldsItsMessage(t *testing.T) {
+	f := newMirror(t)
+	now := time.Date(2026, 11, 25, 10, 5, 0, 0, time.UTC)
+	waiting := []pluginsdk.Session{{ID: "s1", State: "WAITING_FOR_INPUT"}}
+	f.host.Sessions["t1"] = []pluginsdk.Session{{ID: "s1", State: "RUNNING"}} // the turn started after the first read
+	f.host.AddMessage(pluginsdk.Message{ID: "a", SessionID: "s1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "partial", CreatedAt: "2026-11-25T10:01:00Z"})
+	res, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Sessions: waiting, Now: now, Card: CardInput{Task: f.task}})
+	require.NoError(t, err)
+	assert.True(t, res.Held)
+	assert.Empty(t, f.texts())
+
+	f.host.Messages["t1"][0].Content = "partial, now complete"
+	f.host.Sessions["t1"] = waiting
+	f.rec = res.Rec
+	f.sync(t, waiting, now)
+	assert.Equal(t, []string{"partial, now complete"}, f.texts())
 }
 
 func TestMirrorPostsInOrderOnceAndAdvancesCursor(t *testing.T) {
@@ -224,7 +256,7 @@ func TestLostReplyIsNotRepostedOnRetry(t *testing.T) {
 	f := newMirror(t)
 	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "Done.", CreatedAt: "2026-11-25T10:01:00Z"})
 	f.api.LoseNextReply("MessageSend")
-	_, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	_, err := f.try(f.rec)
 	require.Error(t, err)
 
 	f.sync(t, nil, time.Now()) // the record is unchanged, as after a restart
@@ -238,7 +270,7 @@ func TestFailedPartIsResentEvenIfTheChannelShowsTheSameText(t *testing.T) {
 	require.NoError(t, err)
 	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "Done.", CreatedAt: "2026-11-25T10:01:00Z"})
 	f.api.FailNext("MessageSend", &discordapi.Error{Status: 500})
-	_, _, err = f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	_, err = f.try(f.rec)
 	require.Error(t, err)
 
 	f.sync(t, nil, time.Now())
@@ -251,7 +283,7 @@ func TestPartialProgressDoesNotFollowTheTaskToANewChannel(t *testing.T) {
 	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: body, CreatedAt: "2026-11-25T10:01:00Z"})
 	f.api.FailNext("MessageSend", nil)
 	f.api.FailNext("MessageSend", &discordapi.Error{Status: 500})
-	rec, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	rec, err := f.try(f.rec)
 	require.Error(t, err)
 	require.Equal(t, 1, rec.OutboundCursor.PartsSent)
 
@@ -285,7 +317,7 @@ func TestFailedPartResumesWithoutRepeatingDeliveredParts(t *testing.T) {
 	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: body, CreatedAt: "2026-11-25T10:01:00Z"})
 	f.api.FailNext("MessageSend", nil)
 	f.api.FailNext("MessageSend", &discordapi.Error{Status: 500})
-	_, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	_, err := f.try(f.rec)
 	require.Error(t, err)
 	assert.Equal(t, 1, saved.OutboundCursor.PartsSent)
 	assert.Equal(t, "m1", saved.OutboundCursor.PartialID)
@@ -303,12 +335,12 @@ func TestFailedPartResumesWithoutRepeatingDeliveredParts(t *testing.T) {
 func TestFailedPinIsRetriedWithoutRepostingTheCard(t *testing.T) {
 	f := newMirror(t)
 	f.api.FailNext("MessagePin", &discordapi.Error{Status: 500})
-	rec, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	rec, err := f.try(f.rec)
 	require.Error(t, err)
 	require.NotEmpty(t, rec.CardMessageID)
 	assert.False(t, rec.CardPinned)
 	card := rec.CardMessageID
-	rec, _, err = f.m.Sync(context.Background(), Input{Task: f.task, Rec: rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	rec, err = f.try(rec)
 	require.NoError(t, err)
 	assert.Equal(t, card, rec.CardMessageID, "card not reposted")
 	assert.True(t, rec.CardPinned)

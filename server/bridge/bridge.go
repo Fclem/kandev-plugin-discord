@@ -54,6 +54,11 @@ type Bridge struct {
 	events *lru
 	// categoryMu serializes category selection and rollover (channels).
 	categoryMu sync.Mutex
+	// authority fences posting against role changes: every post to a task
+	// channel (from its RolesKey check on) holds it for reading, and a role
+	// change is published under it for writing, so no post that starts
+	// after a role change can use the former role's overwrites.
+	authority sync.RWMutex
 
 	mu           sync.Mutex
 	botUserID    string
@@ -67,8 +72,8 @@ type Bridge struct {
 	// generation whose missed messages were delivered.
 	readyGen int
 	caughtUp map[string]int
-	// notices is the last lifecycle notice posted per guild (notices.go).
-	notices         map[string]string
+	// notices is the lifecycle notice state per guild (notices.go).
+	notices         map[string]*guildNotices
 	downNoticeDelay time.Duration
 }
 
@@ -91,7 +96,7 @@ func New(d Deps) *Bridge {
 		guilds:   map[string]store.Guild{},
 		syncing:  map[string]bool{},
 		caughtUp: map[string]int{},
-		notices:  map[string]string{},
+		notices:  map[string]*guildNotices{},
 		// A routine reconnect takes seconds; only a longer outage is noted.
 		downNoticeDelay: time.Minute,
 	}
@@ -102,32 +107,37 @@ func New(d Deps) *Bridge {
 	return b
 }
 
-// Run connects the gateway through sess and blocks until the bridge context
-// ends or the gateway stops for good.
-func (b *Bridge) Run(sess *discordgo.Session) gateway.State {
+// Run connects the gateway, with a fresh session from newSession for each
+// connection attempt, and blocks until the bridge context ends or the
+// gateway stops for good.
+func (b *Bridge) Run(newSession func() *discordgo.Session) gateway.State {
 	ctx := b.ctx
 	sup := &gateway.Supervisor{
-		Conn:   sess,
 		Budget: &gateway.StoreBudget{St: b.st},
 		Halted: b.halted,
 		Report: func(s gateway.State) { b.setGateway(ctx, s) },
 	}
+	sup.Dial = func() gateway.Conn {
+		sess := newSession()
+		gateway.Observe(sess, sup)
+		sess.ShouldReconnectOnError = false
+		sess.StateEnabled = false
+		sess.Identify.Intents = gateway.Intents
+		// Handlers run on the gateway goroutine in event order and only
+		// queue work, so per-channel message order survives into the task
+		// queue.
+		sess.SyncEvents = true
+		sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) { b.onReady(ctx, r) })
+		sess.AddHandler(func(_ *discordgo.Session, g *discordgo.GuildCreate) { b.onGuildCreate(ctx, g.Guild) })
+		sess.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) { b.onChannelDelete(ctx, c.Channel) })
+		sess.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) { b.onMessageCreate(ctx, m) })
+		sess.AddHandler(func(_ *discordgo.Session, i *discordgo.InteractionCreate) { go b.onInteraction(ctx, i) })
+		sess.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
+		return gateway.NewSession(sess)
+	}
 	if b.haltNotifier != nil {
 		b.haltNotifier.OnHalt(sup.Halt)
 	}
-	gateway.Observe(sess, sup)
-	sess.ShouldReconnectOnError = false
-	sess.StateEnabled = false
-	sess.Identify.Intents = gateway.Intents
-	// Handlers run on the gateway goroutine in event order and only queue
-	// work, so per-channel message order survives into the task queue.
-	sess.SyncEvents = true
-	sess.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) { b.onReady(ctx, r) })
-	sess.AddHandler(func(_ *discordgo.Session, g *discordgo.GuildCreate) { b.onGuildCreate(ctx, g.Guild) })
-	sess.AddHandler(func(_ *discordgo.Session, c *discordgo.ChannelDelete) { b.onChannelDelete(ctx, c.Channel) })
-	sess.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) { b.onMessageCreate(ctx, m) })
-	sess.AddHandler(func(_ *discordgo.Session, i *discordgo.InteractionCreate) { go b.onInteraction(ctx, i) })
-	sess.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
 	go b.reconcileLoop(ctx)
 	final := sup.Run(ctx)
 	b.timers.stopAll()
@@ -205,22 +215,8 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 		rec, err = provision.Provision(ctx, b.api, b.st, provision.Input{
 			Binding: binding, Config: b.cfg, BotUserID: botID,
 			Commands: commands.Definitions(), CommandsHash: commands.DefinitionsHash(b.cfg.ApplicationID), Now: b.now(),
+			SaveRoles: func(ctx context.Context, roles store.Guild) error { return b.publishRoles(ctx, binding, roles) },
 		})
-	}
-	if err != nil && known {
-		// Provision stores a role change before its later steps: run on the
-		// stored record, so channels converge to the new roles and the
-		// former ones are trusted no longer.
-		stored, found, serr := b.st.Guild(ctx, binding.WorkspaceID)
-		b.mu.Lock()
-		switch {
-		case serr != nil:
-			// Roles unknown: hold the workspace rather than trust old ones.
-			delete(b.guilds, binding.WorkspaceID)
-		case found && stored.GuildID == binding.GuildID:
-			b.guilds[binding.WorkspaceID] = stored
-		}
-		b.mu.Unlock()
 	}
 	b.mu.Lock()
 	for i := range b.health.Bindings {
@@ -246,6 +242,26 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 	}
 	b.noticeUp(ctx, binding, rec)
 	return true
+}
+
+// publishRoles stores and adopts a role change before provisioning's later
+// steps. If the change cannot be stored, the workspace is held (no posts)
+// rather than left on the former roles.
+func (b *Bridge) publishRoles(ctx context.Context, binding config.Binding, roles store.Guild) error {
+	b.authority.Lock()
+	defer b.authority.Unlock()
+	err := b.st.PutGuild(ctx, binding.WorkspaceID, roles)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	g, ok := b.guilds[binding.WorkspaceID]
+	switch {
+	case err != nil:
+		delete(b.guilds, binding.WorkspaceID)
+	case ok && g.GuildID == roles.GuildID:
+		g.OperatorRoleID, g.ViewerRoleID = roles.OperatorRoleID, roles.ViewerRoleID
+		b.guilds[binding.WorkspaceID] = g
+	}
+	return err
 }
 
 // isMember reports whether the bot is known to be in a binding's guild.
