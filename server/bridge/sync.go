@@ -9,6 +9,7 @@ import (
 	"github.com/kdlbs/kandev/pluginsdk"
 
 	"kandev-plugin-discord/server/channels"
+	"kandev-plugin-discord/server/discordapi"
 	"kandev-plugin-discord/server/kandev"
 	"kandev-plugin-discord/server/store"
 )
@@ -48,11 +49,21 @@ func (b *Bridge) channelManager() *channels.Manager {
 		SaveIntent: func(ctx context.Context, rec store.Channel) error {
 			return b.st.PutChannel(ctx, rec, rec.ChannelID)
 		},
+		Owner: func(ctx context.Context, channelID string) (string, bool, error) {
+			ix, found, err := b.st.ChannelIndex(ctx, channelID)
+			return ix.TaskID, found, err
+		},
 	}
 }
 
+// flushRetry is how soon a task whose outbound could not be flushed safely
+// (permissions not converged, or Discord failed) is synced again.
+const flushRetry = time.Minute
+
 // syncTask converges one task: channel lifecycle, then (for an active
 // channel) outbound mirroring and prompts. It runs on the task's queue.
+// Nothing is posted to a channel whose overwrites are not yet those of the
+// current roles, and a channel only closes once its final output posted.
 func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	task, err := b.host.GetTask(ctx, taskID)
 	if err != nil && !kandev.IsNotFound(err) {
@@ -84,13 +95,18 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 			return
 		}
 	}
-	if task != nil && rec.Status == store.StatusActive && !channels.WantOpen(b.cfg, task) {
-		// Post the final answer and status before the channel closes.
-		rec = b.syncActive(ctx, task, rec)
+	mgr := b.channelManager()
+	input := func(r store.Channel) channels.Input {
+		return channels.Input{Task: task, Rec: r, Guild: g, ParentIdentifier: b.parentIdentifier(ctx, task), Now: b.now()}
 	}
-	res, err := b.channelManager().Sync(ctx, channels.Input{
-		Task: task, Rec: rec, Guild: g, ParentIdentifier: b.parentIdentifier(ctx, task), Now: b.now(),
-	})
+	if task != nil && rec.Status == store.StatusActive && !channels.WantOpen(b.cfg, task) {
+		var ok bool
+		if rec, ok = b.flushBeforeClose(ctx, mgr, task, input(rec)); !ok {
+			b.kickAfter(taskID, flushRetry)
+			return
+		}
+	}
+	res, err := mgr.Sync(ctx, input(rec))
 	if err != nil {
 		log.Printf("discord: task %s channel: %v", taskID, err)
 	}
@@ -107,9 +123,46 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	if res.RetryAfter > 0 {
 		b.kickAfter(taskID, res.RetryAfter)
 	}
-	if task != nil && res.Rec.Status == store.StatusActive {
-		b.syncActive(ctx, task, res.Rec)
+	if task == nil || res.Rec.Status != store.StatusActive {
+		return
 	}
+	if res.Rec.RolesKey != channels.RolesKey(g) {
+		b.kickAfter(taskID, flushRetry) // a former role may still read the channel
+		return
+	}
+	b.syncActive(ctx, task, res.Rec)
+}
+
+// flushBeforeClose posts a closing task's final answer and status under
+// converged permissions. It reports false when the close must wait: the
+// overwrites or the flush failed transiently, and the next sync retries
+// both. A flush Discord forbids (the bot lost access) cannot succeed later,
+// so the close goes ahead.
+func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, task *pluginsdk.Task, in channels.Input) (store.Channel, bool) {
+	res, err := mgr.Converge(ctx, in, false)
+	if res.Changed {
+		if err := b.st.PutChannel(ctx, res.Rec, in.Rec.ChannelID); err != nil {
+			log.Printf("discord: saving channel record of task %s: %v", task.ID, err)
+			return in.Rec, false
+		}
+	}
+	if err != nil {
+		log.Printf("discord: task %s: holding the close until permissions update: %v", task.ID, err)
+		return res.Rec, false
+	}
+	if res.Rec.Status != store.StatusActive {
+		return res.Rec, true // deleted in Discord: nothing left to flush
+	}
+	next, err := b.syncActive(ctx, task, res.Rec)
+	switch {
+	case err == nil:
+		return next, true
+	case discordapi.IsForbidden(err):
+		log.Printf("discord: task %s: closing without its final output: %v", task.ID, err)
+		return next, true
+	}
+	log.Printf("discord: task %s: holding the close until its final output posts: %v", task.ID, err)
+	return next, false
 }
 
 // retire detaches a record from a guild the workspace is no longer bound

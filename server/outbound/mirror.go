@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -41,7 +42,9 @@ type Input struct {
 }
 
 // Sync posts new messages, status lines, and the card. It returns the new
-// record and, when the card edit was debounced, when to sync again.
+// record and, when the card edit was debounced, when to sync again. A card
+// failure is returned as a *CardError: messages and status lines were
+// flushed.
 func (m *Mirror) Sync(ctx context.Context, in Input) (store.Channel, time.Duration, error) {
 	rec := in.Rec
 	if err := m.pull(ctx, in.Task, &rec, in.Sessions); err != nil {
@@ -57,12 +60,26 @@ func (m *Mirror) Sync(ctx context.Context, in Input) (store.Channel, time.Durati
 		rec.SessionStates = next
 	}
 	retry, err := m.card(ctx, &rec, in.Card, in.Now)
-	return rec, retry, err
+	if err != nil {
+		return rec, retry, &CardError{Err: err}
+	}
+	return rec, retry, nil
 }
+
+// CardError is a task card failure; the card is cosmetic and never holds
+// back a channel close.
+type CardError struct{ Err error }
+
+func (e *CardError) Error() string { return e.Err.Error() }
+func (e *CardError) Unwrap() error { return e.Err }
 
 // pull posts messages created after the cursor, oldest first. While a
 // session runs, its newest agent message may still be growing, so mirroring
 // stops before it until the turn ends.
+//
+// The Host filters by the precise cursor but serializes CreatedAt in whole
+// seconds, so returned rows are compared with the cursor at that precision;
+// the ID tie-break separates rows within one second.
 func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Channel, sessions []pluginsdk.Session) error {
 	msgs, err := m.Host.ListMessages(ctx, task.ID, rec.OutboundCursor.CreatedAt)
 	if err != nil {
@@ -70,10 +87,11 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 	}
 	sort.SliceStable(msgs, func(i, j int) bool { return parseTime(msgs[i].CreatedAt).Before(parseTime(msgs[j].CreatedAt)) })
 	held := heldBack(msgs, sessions)
-	cursorAt := parseTime(rec.OutboundCursor.CreatedAt)
+	c := &rec.OutboundCursor
+	cursorAt := second(c.CreatedAt)
 	for _, msg := range msgs {
-		at := parseTime(msg.CreatedAt)
-		if at.Before(cursorAt) || (at.Equal(cursorAt) && slices.Contains(rec.OutboundCursor.IDs, msg.ID)) {
+		at := second(msg.CreatedAt)
+		if at.Before(cursorAt) || (at.Equal(cursorAt) && slices.Contains(c.IDs, msg.ID)) {
 			continue
 		}
 		if held[msg.ID] {
@@ -81,30 +99,18 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 		}
 		text, post := Render(msg, m.Opts)
 		if post {
-			skip := 0
-			if rec.OutboundCursor.PartialID == msg.ID {
-				skip = rec.OutboundCursor.PartsSent
-			}
-			err := m.post(ctx, rec.ChannelID, text, m.TaskURL(task.ID), skip, func(sent int) error {
-				rec.OutboundCursor.PartialID, rec.OutboundCursor.PartsSent = msg.ID, sent
-				if m.Save == nil {
-					return nil
-				}
-				return m.Save(ctx, *rec)
-			})
-			if err != nil {
+			if err := m.post(ctx, rec, msg.ID, Parts(text, m.TaskURL(task.ID))); err != nil {
 				return err
 			}
 		}
 		if at.Equal(cursorAt) {
-			rec.OutboundCursor.IDs = append(rec.OutboundCursor.IDs, msg.ID)
-			rec.OutboundCursor.PartialID, rec.OutboundCursor.PartsSent = "", 0
+			c.IDs = append(c.IDs, msg.ID)
 		} else {
-			rec.OutboundCursor = store.Cursor{CreatedAt: msg.CreatedAt, IDs: []string{msg.ID}}
-			cursorAt = at
+			c.CreatedAt, c.IDs, cursorAt = msg.CreatedAt, []string{msg.ID}, at
 		}
-		if post && m.Save != nil {
-			if err := m.Save(ctx, *rec); err != nil {
+		c.PartialID, c.PartialChannelID, c.PartsSent, c.Sending = "", "", 0, false
+		if post {
+			if err := m.save(ctx, *rec); err != nil {
 				return fmt.Errorf("saving cursor: %w", err)
 			}
 		}
@@ -112,11 +118,9 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 	return nil
 }
 
-// post sends one rendered message as up to five chunks, then a truncation
-// line, skipping the first skip parts (already delivered by an earlier
-// attempt) and checkpointing after each part, so a retry after a failed
-// part never repeats the parts Discord already shows.
-func (m *Mirror) post(ctx context.Context, channelID, text, url string, skip int, sent func(parts int) error) error {
+// Parts renders one message as up to five chunks plus, when it was cut, a
+// truncation line.
+func Parts(text, url string) []string {
 	chunks, truncated := Limit(Chunk(text, MaxMessageLength))
 	if truncated {
 		line := "… truncated — open the task in Kandev for the full message."
@@ -125,18 +129,84 @@ func (m *Mirror) post(ctx context.Context, channelID, text, url string, skip int
 		}
 		chunks = append(chunks, line)
 	}
-	for i := skip; i < len(chunks); i++ {
-		if _, err := m.API.MessageSend(ctx, channelID, &discordgo.MessageSend{Content: chunks[i]}); err != nil {
-			return fmt.Errorf("posting message part %d: %w", i+1, err)
+	return chunks
+}
+
+// post sends one message's parts to the record's channel. The record is
+// saved with Sending set before each part and with the part counted after
+// it, so a retry resumes after the delivered parts; a part whose outcome
+// is unknown (crash, lost response) is first looked up in the channel, so
+// no part is posted twice. Progress made for another channel is discarded:
+// a replacement channel gets the whole message. The caller saves after the
+// last part, together with the cursor.
+func (m *Mirror) post(ctx context.Context, rec *store.Channel, msgID string, parts []string) error {
+	c := &rec.OutboundCursor
+	if c.PartialID != msgID || c.PartialChannelID != rec.ChannelID {
+		c.PartialID, c.PartialChannelID, c.PartsSent, c.Sending = msgID, rec.ChannelID, 0, false
+	}
+	for c.PartsSent < len(parts) {
+		part := parts[c.PartsSent]
+		if c.Sending {
+			id, found, err := m.findPosted(ctx, rec.ChannelID, c.LastPostID, part)
+			if err != nil {
+				return fmt.Errorf("checking an interrupted post: %w", err)
+			}
+			if found {
+				c.PartsSent, c.Sending, c.LastPostID = c.PartsSent+1, false, id
+				if err := m.save(ctx, *rec); err != nil {
+					return fmt.Errorf("saving message progress: %w", err)
+				}
+				continue
+			}
+		} else {
+			c.Sending = true
+			if err := m.save(ctx, *rec); err != nil {
+				c.Sending = false
+				return fmt.Errorf("saving message progress: %w", err)
+			}
 		}
-		if i < len(chunks)-1 {
-			if err := sent(i + 1); err != nil {
+		sent, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Content: part})
+		if err != nil {
+			return fmt.Errorf("posting message part %d: %w", c.PartsSent+1, err)
+		}
+		c.PartsSent, c.Sending, c.LastPostID = c.PartsSent+1, false, sent.ID
+		if c.PartsSent < len(parts) {
+			if err := m.save(ctx, *rec); err != nil {
 				return fmt.Errorf("saving message progress: %w", err)
 			}
 		}
 	}
 	return nil
 }
+
+// findPosted looks for a bot message with exactly this content after the
+// last part known to be posted (or anywhere in the channel).
+func (m *Mirror) findPosted(ctx context.Context, channelID, afterID, content string) (string, bool, error) {
+	if afterID == "" {
+		afterID = channelID // a channel's ID predates its messages
+	}
+	msgs, err := m.API.ChannelMessages(ctx, channelID, 100, afterID)
+	if err != nil {
+		return "", false, err
+	}
+	want := strings.TrimSpace(content)
+	for _, msg := range msgs {
+		if msg.Author != nil && msg.Author.Bot && strings.TrimSpace(msg.Content) == want {
+			return msg.ID, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (m *Mirror) save(ctx context.Context, rec store.Channel) error {
+	if m.Save == nil {
+		return nil
+	}
+	return m.Save(ctx, rec)
+}
+
+// second parses a timestamp at the Host DTO's whole-second precision.
+func second(s string) time.Time { return parseTime(s).Truncate(time.Second) }
 
 // heldBack marks the newest agent message of each running session.
 func heldBack(msgs []pluginsdk.Message, sessions []pluginsdk.Session) map[string]bool {

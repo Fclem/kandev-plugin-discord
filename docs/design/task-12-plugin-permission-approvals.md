@@ -75,7 +75,9 @@ Repository: `Fclem/kandev-plugin-discord`. Use `/tdd`.
   `kd:perm:<id>:<index>`; overflow links to Kandev), one notice per
   clarification, resolution edits with `ResolvedBy` ("✅ Approved by Alice
   via discord.") or "resolved elsewhere" and no buttons; one step prompt per
-  awaiting `GetStepApproval` of a non-running session (`kd:step:<session>`),
+  awaiting `GetStepApproval` of a non-running session
+  (`kd:step:<session>:<transition key>:<prompt nonce>`; a click whose key or
+  nonce no longer matches approves nothing),
   cleared when no longer awaiting; Office (`Unimplemented`) and missing
   grants post nothing. Runs in every active-channel sync (events,
   reconcile).

@@ -143,6 +143,47 @@ func TestEveryIdentifyIsChargedIncludingInvalidSession(t *testing.T) {
 	assert.Equal(t, 2, n, "both IDENTIFY packets charged")
 }
 
+func TestReidentifyBeyondTheBudgetIsNeverSent(t *testing.T) {
+	b := budget()
+	for range IdentifyLimit - 1 {
+		require.NoError(t, b.Record(context.Background(), time.Now()))
+	}
+	var g *fakeGateway
+	extra := make(chan bool, 1)
+	g = newFakeGateway(t, func(c *websocket.Conn, _ int32) {
+		if !g.readIdentify(c) { // the 900th: within the budget
+			return
+		}
+		_ = c.WriteJSON(map[string]any{"op": 9, "d": false})
+		_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		extra <- g.readIdentify(c) // the client must close instead of re-identifying
+	})
+	s := session(t, g)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var refused atomic.Bool
+	sup := &Supervisor{Conn: s, Budget: b, After: instant, Report: func(st State) {
+		if st.Name == StateRefused {
+			refused.Store(true)
+			cancel()
+		}
+	}}
+	Observe(s, sup)
+	t.Cleanup(func() { discordgo.Logger = nil })
+	s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
+	sup.Run(ctx)
+
+	assert.True(t, refused.Load(), "the gateway waits for budget room")
+	assert.False(t, <-extra, "no IDENTIFY beyond the budget")
+	assert.Equal(t, int32(1), g.identifies.Load())
+	assert.Equal(t, int32(1), g.dials.Load())
+	n, err := b.Count(context.Background(), time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, IdentifyLimit, n)
+	assert.Equal(t, 1, s.ShardCount, "the session's shard fields are restored")
+	assert.Equal(t, 0, s.ShardID)
+}
+
 func TestRedactKeepsOnlyHosts(t *testing.T) {
 	got := redact("Post \"https://discord.com/api/v9/interactions/1/secret-token/callback\": timeout")
 	assert.NotContains(t, got, "secret-token")

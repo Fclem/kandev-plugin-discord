@@ -8,6 +8,22 @@ import (
 	"kandev-plugin-discord/server/kandev"
 )
 
+// /status stays well under Discord's 2000 characters: at most this many
+// sessions are listed, and long names are shortened.
+const (
+	maxStatusSessions = 10
+	maxStatusName     = 60
+	maxStatusTitle    = 200
+)
+
+// clipLine shortens one line to n characters with an ellipsis.
+func clipLine(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
+}
+
 // status replies with the task's state; anyone who sees the channel may ask.
 func (c *call) status(ctx context.Context, taskID string) {
 	task, err := c.Host.GetTask(ctx, taskID)
@@ -24,7 +40,7 @@ func (c *call) status(ctx context.Context, taskID string) {
 	if task.Identifier != "" {
 		title = task.Identifier + " · " + title
 	}
-	fmt.Fprintf(&b, "**%s**\n", title)
+	fmt.Fprintf(&b, "**%s**\n", clipLine(title, maxStatusTitle))
 	state := strings.ToLower(strings.ReplaceAll(task.State, "_", " "))
 	if task.ArchivedAt != nil {
 		state += " (archived)"
@@ -44,7 +60,14 @@ func (c *call) status(ctx context.Context, taskID string) {
 		b.WriteString("Sessions: none yet\n")
 	default:
 		b.WriteString("Sessions:\n")
-		for _, s := range sessions {
+		for i, s := range sessions {
+			queued += c.QueueCount(s.ID)
+			if i == maxStatusSessions {
+				fmt.Fprintf(&b, "• … and %d more\n", len(sessions)-maxStatusSessions)
+			}
+			if i >= maxStatusSessions {
+				continue
+			}
 			name := s.AgentDisplayName
 			if name == "" {
 				name = s.AgentProfileName
@@ -52,8 +75,7 @@ func (c *call) status(ctx context.Context, taskID string) {
 			if name == "" {
 				name = "agent"
 			}
-			fmt.Fprintf(&b, "• %s — %s\n", name, strings.ToLower(strings.ReplaceAll(s.State, "_", " ")))
-			queued += c.QueueCount(s.ID)
+			fmt.Fprintf(&b, "• %s — %s\n", clipLine(name, maxStatusName), strings.ToLower(strings.ReplaceAll(s.State, "_", " ")))
 		}
 	}
 	pending := "unavailable"

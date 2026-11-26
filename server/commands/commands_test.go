@@ -2,7 +2,10 @@ package commands
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kdlbs/kandev/pluginsdk"
@@ -112,6 +115,19 @@ func TestStatusForAnyone(t *testing.T) {
 	for _, want := range []string{"**KAN-1 · Fix login**", "State: in progress · Step: Review", "• Claude — running", "Queued messages: 2 · Pending requests: 1", "https://kandev.example.com/t/t1"} {
 		assert.Contains(t, got, want)
 	}
+}
+
+func TestStatusFitsDiscordsLimitWithManySessions(t *testing.T) {
+	f := newFixture(t)
+	long := strings.Repeat("A", 300)
+	for i := range 60 {
+		f.host.Sessions["t1"] = append(f.host.Sessions["t1"], pluginsdk.Session{ID: fmt.Sprint("s", i), State: "WAITING_FOR_INPUT", AgentDisplayName: long})
+	}
+	got := f.run(f.command(guestUser, CmdStatus))
+	assert.LessOrEqual(t, utf8.RuneCountInString(got), 2000)
+	assert.Contains(t, got, "… and 50 more")
+	assert.Contains(t, got, "https://kandev.example.com/t/t1", "the link survives")
+	assert.LessOrEqual(t, utf8.RuneCountInString(clip(strings.Repeat("line\n", 1000), 2000)), 2000)
 }
 
 func running(id string) pluginsdk.ExactSessionObservation {

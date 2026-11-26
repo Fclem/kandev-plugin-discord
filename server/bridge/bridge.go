@@ -67,6 +67,9 @@ type Bridge struct {
 	// generation whose missed messages were delivered.
 	readyGen int
 	caughtUp map[string]int
+	// notices is the last lifecycle notice posted per guild (notices.go).
+	notices         map[string]string
+	downNoticeDelay time.Duration
 }
 
 // New returns an idle bridge; Run starts the gateway. The scheduler exists
@@ -88,6 +91,9 @@ func New(d Deps) *Bridge {
 		guilds:   map[string]store.Guild{},
 		syncing:  map[string]bool{},
 		caughtUp: map[string]int{},
+		notices:  map[string]string{},
+		// A routine reconnect takes seconds; only a longer outage is noted.
+		downNoticeDelay: time.Minute,
 	}
 	b.health = store.Health{GatewayState: gateway.StateStopped}
 	for _, binding := range d.Config.Bindings {
@@ -171,20 +177,28 @@ func (b *Bridge) onGuildCreate(ctx context.Context, g *discordgo.Guild) {
 	b.sched.Do("guild:"+g.ID, func(ctx context.Context) { b.provisionAndReconcile(ctx, binding) })
 }
 
+// provisionAndReconcile provisions a guild and reconciles its workspace. A
+// failed re-provisioning of a known guild still reconciles with the record
+// it has.
 func (b *Bridge) provisionAndReconcile(ctx context.Context, binding config.Binding) {
-	if b.provisionGuild(ctx, binding) {
-		b.reconcileWorkspace(ctx, binding, true)
+	_, known := b.guild(binding.WorkspaceID)
+	if b.provisionGuild(ctx, binding) || known {
+		b.reconcileWorkspace(ctx, binding)
 	}
 }
 
 // provisionGuild needs the bot's user ID for its channel overwrites; a
-// failed attempt is retried by the periodic reconcile.
+// failed attempt is retried by the periodic reconcile. It holds the
+// category lock: channel placement rewrites the same guild record (category
+// rollover), and neither may overwrite the other's update.
 func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) bool {
 	botID := b.botID()
 	var (
 		rec store.Guild
 		err error
 	)
+	b.categoryMu.Lock()
+	_, known := b.guild(binding.WorkspaceID)
 	if botID == "" {
 		err = errors.New("the bot identity is not known yet (no READY)")
 	} else {
@@ -199,7 +213,7 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 		if bh.WorkspaceID != binding.WorkspaceID {
 			continue
 		}
-		bh.BotMember, bh.Provisioned, bh.Error = true, err == nil, ""
+		bh.BotMember, bh.Provisioned, bh.Error = true, err == nil || known, ""
 		if err != nil {
 			bh.Error = "provisioning failed: " + err.Error()
 		}
@@ -208,12 +222,14 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 		b.guilds[binding.WorkspaceID] = rec
 	}
 	b.mu.Unlock()
+	b.categoryMu.Unlock()
 	b.saveHealth(ctx)
 	if err != nil {
 		log.Printf("discord: provisioning server %s for workspace %s failed: %v", binding.GuildID, binding.WorkspaceID, err)
+		b.noticeProvisioningFailed(ctx, binding, err)
 		return false
 	}
-	log.Printf("discord: server %s provisioned for workspace %s", binding.GuildID, binding.WorkspaceID)
+	b.noticeUp(ctx, binding, rec)
 	return true
 }
 
@@ -263,6 +279,7 @@ func (b *Bridge) setGuild(ctx context.Context, workspaceID string, g store.Guild
 
 func (b *Bridge) setGateway(ctx context.Context, s gateway.State) {
 	b.mu.Lock()
+	prev := b.health.GatewayState
 	b.health.GatewayState = s.Name
 	b.health.Reason = s.Reason
 	if s.CloseCode != 0 {
@@ -276,6 +293,9 @@ func (b *Bridge) setGateway(ctx context.Context, s gateway.State) {
 		log.Printf("discord: gateway %s: %s", s.Name, s.Reason)
 	}
 	b.saveHealth(ctx)
+	if s.Name != prev {
+		b.gatewayChanged(prev, s)
+	}
 }
 
 func (b *Bridge) saveHealth(ctx context.Context) {

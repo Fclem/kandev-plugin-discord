@@ -58,3 +58,26 @@
 - Interaction acknowledgements never wait behind bot traffic, and error
   messages never contain interaction tokens.
 - A message with a very long code-fence opener can no longer hang a task.
+
+### Fixed (adversarial review round 2)
+
+- No task output reaches a channel before its permissions reflect the
+  current operator and viewer roles.
+- A closing channel waits until its final answer posted.
+- An Approve button only approves the exact transition and prompt it shows.
+- A message that failed live delivery is retried, in order, before later
+  ones; a catch-up interrupted at reconnect finishes on the next pass.
+- Deleted task categories are recreated; provisioning re-runs every pass
+  and no longer races category rollover.
+- A channel created before a lost save is reused even after a rename, and
+  never one belonging to another task.
+- A long message interrupted by a crash or a lost reply is not posted twice,
+  and a replacement channel receives it whole.
+- Approval prompts keep their buttons recorded until Discord confirms the
+  edit.
+- An invalid-session re-identify can no longer exceed the identify budget.
+- `/status` and other command replies stay within Discord's 2000
+  characters.
+- The settings card rejects the same bindings the backend rejects.
+- `#kandev-status` announces connection, outages, and provisioning failures.
+- Messages from the first second of a new channel's backlog are mirrored.

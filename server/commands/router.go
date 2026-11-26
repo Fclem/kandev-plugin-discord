@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"log"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kdlbs/kandev/pluginsdk"
@@ -117,11 +118,31 @@ func (c *call) taskOfChannel(ctx context.Context) (string, bool) {
 	return ix.TaskID, true
 }
 
-// reply replaces the deferred ephemeral response.
+// maxReply is Discord's message content limit (characters).
+const maxReply = 2000
+
+// reply replaces the deferred ephemeral response. Text beyond Discord's
+// limit is cut at a line boundary with a marker, so the edit never fails.
 func (c *call) reply(ctx context.Context, text string) {
+	text = clip(text, maxReply)
 	if err := c.API.InteractionEdit(ctx, c.i, &discordgo.WebhookEdit{Content: &text}); err != nil {
 		log.Printf("discord: answering interaction %s: %v", c.i.ID, err)
 	}
+}
+
+// clip shortens text to at most limit characters, preferring a line break,
+// and marks the cut.
+func clip(text string, limit int) string {
+	const marker = "\n… (more in Kandev)"
+	r := []rune(text)
+	if len(r) <= limit {
+		return text
+	}
+	cut := string(r[:limit-len([]rune(marker))])
+	if i := strings.LastIndex(cut, "\n"); i > len(cut)/2 {
+		cut = cut[:i]
+	}
+	return cut + marker
 }
 
 // respond answers an interaction immediately and ephemerally.

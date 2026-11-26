@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +46,33 @@ func TestParseBindings(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
+	}
+}
+
+// TestParseBindingsSharedFixture keeps the settings card's parser
+// (ui/bundle.js parseBindings) and this one in agreement.
+func TestParseBindingsSharedFixture(t *testing.T) {
+	raw, err := os.ReadFile("../../tests/fixtures/bindings.json")
+	require.NoError(t, err)
+	var cases []struct {
+		Name     string      `json:"name"`
+		Input    string      `json:"input"`
+		Bindings [][2]string `json:"bindings"`
+		Problems int         `json:"problems"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &cases))
+	for _, c := range cases {
+		got, err := ParseBindings(c.Input)
+		pairs := [][2]string{}
+		for _, b := range got {
+			pairs = append(pairs, [2]string{b.WorkspaceID, b.GuildID})
+		}
+		assert.Equal(t, c.Bindings, pairs, c.Name)
+		problems := 0
+		if err != nil {
+			problems = len(err.(interface{ Unwrap() []error }).Unwrap())
+		}
+		assert.Equal(t, c.Problems, problems, c.Name)
 	}
 }
 

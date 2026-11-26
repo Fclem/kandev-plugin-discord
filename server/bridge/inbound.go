@@ -67,7 +67,10 @@ func (b *Bridge) onMessageCreate(_ context.Context, m *discordgo.MessageCreate) 
 			}
 			rec, _, _ = b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
 			if _, err := b.inboundHandler(guild).Handle(ctx, rec, msg); err != nil {
-				log.Printf("discord: delivering message %s to task %s: %v", msg.ID, ix.TaskID, err)
+				// The cursor stayed before this message; later messages must
+				// not move it past, so the channel catches up from it first.
+				log.Printf("discord: delivering message %s to task %s: %v; retrying from history", msg.ID, ix.TaskID, err)
+				b.retryCatchUp(rec)
 			}
 		})
 	})
@@ -92,20 +95,38 @@ func (b *Bridge) activeRecord(ctx context.Context, taskID, channelID, guildID st
 // reports whether live delivery may proceed.
 func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild store.Guild) bool {
 	b.mu.Lock()
-	gen, done := b.readyGen, b.caughtUp[rec.ChannelID]
+	gen := b.readyGen
 	b.mu.Unlock()
-	if done >= gen {
+	if !b.needsCatchUp(rec.ChannelID) {
 		return true
 	}
 	if _, err := b.inboundHandler(guild).CatchUp(ctx, rec); err != nil {
 		log.Printf("discord: catching up channel of task %s: %v", rec.TaskID, err)
-		b.timers.after("catchup:"+rec.ChannelID, catchUpRetry, func() { b.catchUp(rec.TaskID, rec.ChannelID) })
+		b.retryCatchUp(rec)
 		return false
 	}
 	b.mu.Lock()
 	b.caughtUp[rec.ChannelID] = gen
 	b.mu.Unlock()
 	return true
+}
+
+// retryCatchUp makes the channel catch up from its saved cursor before any
+// further live message, and schedules that catch-up.
+func (b *Bridge) retryCatchUp(rec store.Channel) {
+	b.mu.Lock()
+	b.caughtUp[rec.ChannelID] = -1
+	b.mu.Unlock()
+	b.timers.after("catchup:"+rec.ChannelID, catchUpRetry, func() { b.catchUp(rec.TaskID, rec.ChannelID) })
+}
+
+// needsCatchUp reports whether a channel has not caught up since the last
+// READY, or since a failed delivery.
+func (b *Bridge) needsCatchUp(channelID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	done, ok := b.caughtUp[channelID]
+	return !ok || done < b.readyGen
 }
 
 // catchUp queues the catch-up of one channel on its intake queue.

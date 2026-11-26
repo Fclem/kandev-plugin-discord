@@ -173,8 +173,12 @@ func TestMirrorPostsInOrderOnceAndAdvancesCursor(t *testing.T) {
 	f.host.AddMessage(pluginsdk.Message{ID: "c", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "same second", CreatedAt: "2026-11-25T10:01:00Z"})
 	f.sync(t, nil, now)
 	assert.Equal(t, []string{"first", "second", "same second"}, f.texts())
-	assert.Equal(t, store.Cursor{CreatedAt: "2026-11-25T10:01:00Z", IDs: []string{"b", "c"}}, f.rec.OutboundCursor)
-	assert.Equal(t, 3, f.saves, "cursor saved after each posted message")
+	cur := f.rec.OutboundCursor
+	assert.Equal(t, "2026-11-25T10:01:00Z", cur.CreatedAt)
+	assert.Equal(t, []string{"b", "c"}, cur.IDs)
+	assert.Empty(t, cur.PartialID)
+	assert.False(t, cur.Sending)
+	assert.Equal(t, 6, f.saves, "saved before (send intent) and after each posted message")
 
 	f.api.ResetCalls()
 	f.sync(t, nil, now)
@@ -203,6 +207,55 @@ func TestMirrorTruncatesLongMessagesWithALink(t *testing.T) {
 	texts := f.texts()
 	require.Len(t, texts, MaxChunks+1)
 	assert.Equal(t, "… truncated — open in Kandev: https://k/t/t1", texts[MaxChunks])
+}
+
+func TestLostReplyIsFoundInsteadOfRepostedAfterARestart(t *testing.T) {
+	f := newMirror(t)
+	var saved store.Channel
+	f.m.Save = func(_ context.Context, r store.Channel) error { saved = r; return nil }
+	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "Done.", CreatedAt: "2026-11-25T10:01:00Z"})
+	f.api.LoseNextReply("MessageSend")
+	_, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	require.True(t, saved.OutboundCursor.Sending, "the send intent was saved before posting")
+
+	f.rec = saved // a restart: only what was saved survives
+	f.sync(t, nil, time.Now())
+	assert.Equal(t, []string{"Done."}, f.texts(), "posted exactly once")
+	assert.Equal(t, []string{"m1"}, f.rec.OutboundCursor.IDs)
+	assert.False(t, f.rec.OutboundCursor.Sending)
+}
+
+func TestPartialProgressDoesNotFollowTheTaskToANewChannel(t *testing.T) {
+	f := newMirror(t)
+	body := strings.Repeat("a", 1990) + "\n" + strings.Repeat("b", 1990)
+	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: body, CreatedAt: "2026-11-25T10:01:00Z"})
+	f.api.FailNext("MessageSend", nil)
+	f.api.FailNext("MessageSend", &discordapi.Error{Status: 500})
+	rec, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	require.Equal(t, 1, rec.OutboundCursor.PartsSent)
+
+	replacement := f.api.AddChannel(&discordgo.Channel{GuildID: "g", Name: "kan-1"})
+	rec.ChannelID = replacement.ID
+	f.rec = rec
+	f.sync(t, nil, time.Now())
+	texts := f.texts()
+	require.Len(t, texts, 2, "the new channel gets the whole message")
+	assert.True(t, strings.HasPrefix(texts[0], "aaa"))
+	assert.True(t, strings.HasPrefix(texts[1], "bbb"))
+}
+
+func TestFractionalCursorKeepsRowsOfItsFirstSecond(t *testing.T) {
+	f := newMirror(t)
+	f.rec.OutboundCursor = store.Cursor{CreatedAt: "2026-11-25T10:00:00.5Z"}
+	// Created at 10:00:00.75, serialized by the Host in whole seconds.
+	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "early", CreatedAt: "2026-11-25T10:00:00Z"})
+	f.sync(t, nil, time.Now())
+	assert.Equal(t, []string{"early"}, f.texts())
+	f.api.ResetCalls()
+	f.sync(t, nil, time.Now())
+	assert.Empty(t, f.api.CallsTo("MessageSend"))
 }
 
 func TestFailedPartResumesWithoutRepeatingDeliveredParts(t *testing.T) {

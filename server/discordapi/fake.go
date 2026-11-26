@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -42,9 +43,10 @@ type Fake struct {
 	// Interactions records responses and edits per interaction ID.
 	Interactions map[string][]any
 
-	calls  []Call
-	errs   map[string][]error
-	nextID uint64
+	calls     []Call
+	errs      map[string][]error
+	lostReply map[string]int
+	nextID    uint64
 }
 
 var _ API = (*Fake)(nil)
@@ -62,6 +64,7 @@ func NewFake() *Fake {
 		Commands:     map[string][]*discordgo.ApplicationCommand{},
 		Interactions: map[string][]any{},
 		errs:         map[string][]error{},
+		lostReply:    map[string]int{},
 		nextID:       1_000_000_000_000_000_000,
 	}
 }
@@ -76,6 +79,31 @@ func (f *Fake) NewID() string {
 func (f *Fake) newIDLocked() string {
 	f.nextID++
 	return strconv.FormatUint(f.nextID, 10)
+}
+
+// StartIDsAt makes later IDs carry creation time t, like Discord's.
+func (f *Fake) StartIDsAt(t time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextID = uint64(t.UnixMilli()-discordEpochMs) << 22
+}
+
+const discordEpochMs = 1420070400000
+
+// LoseNextReply makes the next call of method take effect in Discord but
+// return an error, like a response lost to a timeout.
+func (f *Fake) LoseNextReply(method string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lostReply[method]++
+}
+
+func (f *Fake) lost(method string) error {
+	if f.lostReply[method] == 0 {
+		return nil
+	}
+	f.lostReply[method]--
+	return &Error{Status: 502, Message: "response lost"}
 }
 
 // FailNext makes the next call of method return err (queued in order).
@@ -366,6 +394,9 @@ func (f *Fake) MessageSend(_ context.Context, channelID string, data *discordgo.
 		Components: data.Components, Author: f.BotUser, MessageReference: data.Reference,
 	}
 	f.Messages[channelID] = append(f.Messages[channelID], m)
+	if err := f.lost("MessageSend"); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 

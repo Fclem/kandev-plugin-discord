@@ -171,25 +171,41 @@ func TestStepApprovalOutcomes(t *testing.T) {
 	f.host.ApproveFn = func(pluginsdk.ExactStepApprovalCommand) (*pluginsdk.CommandResult, pluginsdk.StepApprovalResult, error) {
 		return &pluginsdk.CommandResult{Status: pluginsdk.CommandConflict, Reason: "step_not_awaiting_approval"}, pluginsdk.StepApprovalResult{}, nil
 	}
-	assert.Equal(t, msgNothingAwaiting, f.run(f.button(opUser, prompts.StepButtonID("s1", "review"))))
+	assert.Equal(t, msgNothingAwaiting, f.run(f.button(opUser, reviewButton(t, f))))
 
 	f.host.StepFn = func(pluginsdk.ExactStepApprovalQuery) (pluginsdk.StepApproval, error) {
 		return pluginsdk.StepApproval{}, status.Error(codes.Unimplemented, "office approval stage")
 	}
-	got := f.run(f.button(opUser, prompts.StepButtonID("s1", "review")))
+	got := f.run(f.button(opUser, reviewButton(t, f)))
 	assert.Equal(t, "This is an Office approval stage; approve it in Kandev: https://kandev.example.com/t/t1", got)
 }
 
-func TestStaleStepButtonApprovesNothing(t *testing.T) {
+// reviewButton records a posted Review → Done prompt and returns its button.
+func reviewButton(t *testing.T, f *fixture) string {
+	t.Helper()
+	require.NoError(t, f.st.PutStepApproval(context.Background(), "t1", store.StepApproval{
+		SessionID: "s1", FromStepID: "review", ToStepID: "done", Nonce: "n1", MessageID: "m1",
+	}))
+	return prompts.StepButtonID("s1", prompts.StepKey("review", "done"), "n1")
+}
+
+func TestStaleStepButtonsApproveNothing(t *testing.T) {
 	f := newFixture(t)
-	awaitingStep(f) // the session now awaits approval of "review"
-	got := f.run(f.button(opUser, prompts.StepButtonID("s1", "design")))
-	assert.Contains(t, got, "out of date")
+	awaitingStep(f) // the session awaits approval of Review → Done
+	current := reviewButton(t, f)
+	stale := map[string]string{
+		"another transition": prompts.StepButtonID("s1", prompts.StepKey("review", "deploy"), "n1"),
+		"an earlier prompt":  prompts.StepButtonID("s1", prompts.StepKey("review", "done"), "n0"),
+	}
+	for name, button := range stale {
+		got := f.run(f.button(opUser, button))
+		assert.Contains(t, got, "out of date", name)
+	}
 	assert.Empty(t, f.host.Receipts)
 	assert.Empty(t, f.host.Approvals)
 	assert.Contains(t, f.syncs, "t1", "the task is re-synced so the stale prompt is cleared")
 
-	f.run(f.button(opUser, prompts.StepButtonID("s1", "review")))
+	f.run(f.button(opUser, current))
 	assert.Len(t, f.host.Approvals, 1)
 }
 
@@ -234,5 +250,5 @@ func TestAutocompleteListsPermissionsAndSteps(t *testing.T) {
 	assert.Equal(t, "Permission: Run tests?", resp.Data.Choices[0].Name)
 	assert.Equal(t, "perm:i1", resp.Data.Choices[0].Value)
 	assert.Equal(t, "Step: Review → Done", resp.Data.Choices[1].Name)
-	assert.Equal(t, "step:s1:review", resp.Data.Choices[1].Value)
+	assert.Equal(t, "step:s1:"+prompts.StepKey("review", "done"), resp.Data.Choices[1].Value)
 }

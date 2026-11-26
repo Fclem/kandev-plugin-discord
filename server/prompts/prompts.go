@@ -7,6 +7,9 @@ package prompts
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"slices"
@@ -26,7 +29,7 @@ import (
 // Button custom IDs.
 const (
 	PermissionButtonPrefix = "kd:perm:" // kd:perm:<interaction id>:<option index>
-	StepButtonPrefix       = "kd:step:" // kd:step:<session id>:<from step id>
+	StepButtonPrefix       = "kd:step:" // kd:step:<session id>:<step key>:<prompt nonce>
 )
 
 // Discord component limits.
@@ -65,20 +68,31 @@ func ParsePermissionButton(customID string) (interactionID string, option int, o
 	return rest[:i], n, err == nil
 }
 
-// StepButtonID binds an Approve button to the step it was posted for, so a
-// stale prompt can never approve a later step of the same session.
-func StepButtonID(sessionID, fromStepID string) string {
-	return StepButtonPrefix + sessionID + ":" + fromStepID
+// StepKey names one approval transition (from step, to step) in a short
+// opaque form that fits a component custom ID.
+func StepKey(fromStepID, toStepID string) string {
+	sum := sha256.Sum256([]byte(fromStepID + "\x00" + toStepID))
+	return hex.EncodeToString(sum[:6])
+}
+
+// StepButtonID binds an Approve button to the transition it displays and
+// to the posted prompt, so neither a changed approval target nor a later
+// visit to the same step can be approved through an old button.
+func StepButtonID(sessionID, stepKey, nonce string) string {
+	return StepButtonPrefix + sessionID + ":" + stepKey + ":" + nonce
 }
 
 // ParseStepButton splits a step button custom ID.
-func ParseStepButton(customID string) (sessionID, fromStepID string, ok bool) {
+func ParseStepButton(customID string) (sessionID, stepKey, nonce string, ok bool) {
 	rest, ok := strings.CutPrefix(customID, StepButtonPrefix)
 	if !ok {
-		return "", "", false
+		return "", "", "", false
 	}
-	sessionID, fromStepID, ok = strings.Cut(rest, ":")
-	return sessionID, fromStepID, ok && sessionID != "" && fromStepID != ""
+	parts := strings.Split(rest, ":")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return "", "", "", false
+	}
+	return parts[0], parts[1], parts[2], true
 }
 
 // Sync posts prompts for pending interactions without one, resolves prompts
@@ -131,7 +145,11 @@ func (p *Poster) syncInteractions(ctx context.Context, task *pluginsdk.Task, rec
 			kept = append(kept, pr)
 			continue
 		}
-		p.Resolve(ctx, rec.ChannelID, pr.MessageID, ResolvedText(it, nil))
+		if err := p.Resolve(ctx, rec.ChannelID, pr.MessageID, ResolvedText(it, nil)); err != nil {
+			log.Printf("discord: task %s: %v; retrying on the next sync", task.ID, err)
+			kept = append(kept, pr)
+			continue
+		}
 		changed = true
 	}
 	if !changed {
@@ -229,8 +247,10 @@ func ResolvedText(it *pluginsdk.Interaction, actor *pluginsdk.InteractionActor) 
 	return "✅ Resolved elsewhere."
 }
 
-// Resolve appends an outcome to a prompt and removes its buttons.
-func (p *Poster) Resolve(ctx context.Context, channelID, messageID, outcome string) {
+// Resolve appends an outcome to a prompt and removes its buttons. It
+// returns an error only when the prompt may still show live buttons; a
+// message or channel Discord no longer has counts as resolved.
+func (p *Poster) Resolve(ctx context.Context, channelID, messageID, outcome string) error {
 	original := ""
 	if msgs, err := p.API.ChannelMessages(ctx, channelID, 1, prevID(messageID)); err == nil && len(msgs) > 0 && msgs[0].ID == messageID {
 		original = msgs[0].Content
@@ -238,8 +258,9 @@ func (p *Poster) Resolve(ctx context.Context, channelID, messageID, outcome stri
 	content := strings.TrimSpace(truncate(original, maxPromptLength) + "\n\n" + outcome)
 	empty := []discordgo.MessageComponent{}
 	if _, err := p.API.MessageEdit(ctx, &discordgo.MessageEdit{Channel: channelID, ID: messageID, Content: &content, Components: &empty}); err != nil && !discordapi.IsGone(err) {
-		log.Printf("discord: updating prompt %s: %v", messageID, err)
+		return fmt.Errorf("updating prompt %s: %w", messageID, err)
 	}
+	return nil
 }
 
 // prevID is the snowflake just before id, so ChannelMessages(after=prev,
@@ -253,7 +274,9 @@ func prevID(id string) string {
 }
 
 // syncStep posts the step approval prompt when a session's step awaits the
-// native Approve action, and clears it when that is no longer true.
+// native Approve action, and clears it when that is no longer true. A
+// prompt whose buttons could not be removed stays recorded, so the next
+// sync retries the edit before posting another.
 func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.Channel, sessions []pluginsdk.Session) error {
 	current, posted, err := p.Store.StepApproval(ctx, task.ID)
 	if err != nil {
@@ -282,7 +305,9 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 		return nil
 	}
 	if posted {
-		p.Resolve(ctx, rec.ChannelID, current.MessageID, "⏹️ No longer pending.")
+		if err := p.Resolve(ctx, rec.ChannelID, current.MessageID, "⏹️ No longer pending."); err != nil {
+			return err
+		}
 		if err := p.Store.DeleteStepApproval(ctx, task.ID); err != nil {
 			return err
 		}
@@ -295,10 +320,12 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 		text += fmt.Sprintf(" → **%s**", awaiting.ToStepName)
 	}
 	text += ". Approve to move on, or post a message to request changes."
+	nonce := newNonce()
 	msg, err := p.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{
 		Content: text,
 		Components: rows([]discordgo.MessageComponent{discordgo.Button{
-			Label: "Approve", Style: discordgo.SuccessButton, CustomID: StepButtonID(awaiting.SessionID, awaiting.FromStepID),
+			Label: "Approve", Style: discordgo.SuccessButton,
+			CustomID: StepButtonID(awaiting.SessionID, StepKey(awaiting.FromStepID, awaiting.ToStepID), nonce),
 		}}),
 	})
 	if err != nil {
@@ -306,8 +333,14 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 	}
 	return p.Store.PutStepApproval(ctx, task.ID, store.StepApproval{
 		SessionID: awaiting.SessionID, FromStepID: awaiting.FromStepID, ToStepID: awaiting.ToStepID,
-		MessageID: msg.ID, PostedAt: p.Now(),
+		Nonce: nonce, MessageID: msg.ID, PostedAt: p.Now(),
 	})
+}
+
+func newNonce() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func truncate(s string, n int) string {

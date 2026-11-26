@@ -83,6 +83,8 @@ type Supervisor struct {
 	disconnected chan struct{}
 	lastClose    atomic.Int64
 	runCtx       atomic.Pointer[context.Context]
+	// refused is set when an op 9 re-identify was refused for the budget.
+	refused atomic.Bool
 }
 
 func (s *Supervisor) init() {
@@ -146,6 +148,25 @@ func (s *Supervisor) identifySent() {
 	}
 }
 
+// mayIdentify reports whether the budget has room for one more IDENTIFY.
+// An unreadable counter refuses, like Run does before connecting.
+func (s *Supervisor) mayIdentify() bool {
+	s.init()
+	ctx := context.Background()
+	if p := s.runCtx.Load(); p != nil {
+		ctx = context.WithoutCancel(*p)
+	}
+	count, err := s.Budget.Count(ctx, s.Now())
+	return err == nil && count < IdentifyLimit
+}
+
+// refuse wakes Run after an op 9 re-identify was refused: the socket is
+// open but unidentified, so Run closes it and waits for budget room.
+func (s *Supervisor) refuse() {
+	s.refused.Store(true)
+	s.Disconnected()
+}
+
 // fatalClose returns the recorded fatal close code, clearing the record.
 func (s *Supervisor) fatalClose() int {
 	code := int(s.lastClose.Swap(0))
@@ -186,6 +207,9 @@ func (s *Supervisor) Run(ctx context.Context) State {
 		s.lastClose.Store(0)
 		s.Report(State{Name: StateConnecting, Identifies24h: count})
 		if err := s.Conn.Open(); err != nil {
+			if s.refused.Swap(false) {
+				continue // the budget check reports the refusal and waits
+			}
 			code := closeCode(err)
 			if c := s.fatalClose(); c != 0 {
 				code = c
@@ -209,6 +233,10 @@ func (s *Supervisor) Run(ctx context.Context) State {
 			if s.Halted() {
 				_ = s.Conn.Close()
 				return s.stop(StateHalted, 0, haltReason)
+			}
+			if s.refused.Swap(false) {
+				_ = s.Conn.Close()
+				continue // the budget check reports the refusal and waits
 			}
 			if code := s.fatalClose(); code != 0 {
 				_ = s.Conn.Close()

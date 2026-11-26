@@ -2,6 +2,8 @@ package bridge
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"time"
@@ -24,14 +26,15 @@ type stepCache struct {
 }
 
 // syncActive mirrors an active channel: messages, status lines, the card,
-// and pending prompts, and returns the saved record. It schedules the next
-// live update while a session runs. A channel Discord no longer has is
-// marked deleted and the task re-synced, which recreates it.
-func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store.Channel) store.Channel {
+// and pending prompts, and returns the saved record with the error that
+// kept messages or status lines from posting (card and prompt failures are
+// only logged). It schedules the next live update while a session runs. A
+// channel Discord no longer has is marked deleted and the task re-synced,
+// which recreates it.
+func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store.Channel) (store.Channel, error) {
 	sessions, err := b.host.ListSessions(ctx, task.ID)
 	if err != nil {
-		log.Printf("discord: task %s: listing sessions: %v", task.ID, err)
-		return rec
+		return rec, fmt.Errorf("listing sessions: %w", err)
 	}
 	b.rememberSessions(task.ID, sessions)
 	pending := b.pendingCount(ctx, task.ID)
@@ -47,9 +50,6 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 			Queued: b.queued(sessions), Pending: pending, URL: b.cfg.TaskURL(task.ID),
 		},
 	})
-	if err != nil {
-		log.Printf("discord: task %s: mirroring: %v", task.ID, err)
-	}
 	if !reflect.DeepEqual(next, rec) {
 		if err := b.st.PutChannel(ctx, next, next.ChannelID); err != nil {
 			log.Printf("discord: task %s: saving channel record: %v", task.ID, err)
@@ -59,7 +59,16 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 		if b.markGone(ctx, task.ID, next.ChannelID) {
 			b.Kick(task.ID)
 		}
-		return channels.MarkDeleted(next, b.now())
+		return channels.MarkDeleted(next, b.now()), nil
+	}
+	var cardErr *outbound.CardError
+	flushErr := err
+	if errors.As(err, &cardErr) {
+		log.Printf("discord: task %s: task card: %v", task.ID, err)
+		flushErr = nil
+	} else if err != nil {
+		log.Printf("discord: task %s: mirroring: %v", task.ID, err)
+		retry = flushRetry
 	}
 	if retry > 0 {
 		b.kickAfter(task.ID, retry)
@@ -71,7 +80,7 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 	if b.cfg.LiveUpdateInterval > 0 && anyRunning(sessions) {
 		b.kickAfter(task.ID, b.cfg.LiveUpdateInterval)
 	}
-	return next
+	return next, flushErr
 }
 
 func anyRunning(sessions []pluginsdk.Session) bool {

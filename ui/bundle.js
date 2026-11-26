@@ -36,7 +36,8 @@ export function inviteUrl(applicationId, guildId) {
 const SNOWFLAKE = /^[0-9]{17,20}$/;
 
 // Mirrors server/config.ParseBindings for display; the backend stays the
-// authority and reports the same problems in connection.test.
+// authority and reports the same problems in connection.test. Both are
+// checked against tests/fixtures/bindings.json.
 export function parseBindings(raw) {
   const bindings = [];
   const problems = [];
@@ -49,6 +50,7 @@ export function parseBindings(raw) {
     const workspaceId = eq < 0 ? "" : entry.slice(0, eq).trim();
     const guildId = eq < 0 ? "" : entry.slice(eq + 1).trim();
     if (!workspaceId || !guildId) problems.push(`"${entry}" must look like <workspace id>=<server id>`);
+    else if (/[ \t]/.test(workspaceId)) problems.push(`workspace id "${workspaceId}" must not contain spaces`);
     else if (!SNOWFLAKE.test(guildId)) problems.push(`server id "${guildId}" is not a Discord ID`);
     else if (seenWorkspaces.has(workspaceId)) problems.push(`workspace ${workspaceId} is bound twice`);
     else if (seenGuilds.has(guildId)) problems.push(`server ${guildId} is bound to two workspaces`);
@@ -57,6 +59,9 @@ export function parseBindings(raw) {
       seenGuilds.add(guildId);
       bindings.push({ workspaceId, guildId });
     }
+  }
+  if (bindings.length === 0 && problems.length === 0) {
+    problems.push("workspace_guilds needs at least one <workspace id>=<server id> pair");
   }
   return { bindings, problems };
 }

@@ -137,14 +137,44 @@ func TestStepApprovalPromptFollowsGetStepApproval(t *testing.T) {
 	sent := f.api.SentMessages(f.rec.ChannelID)
 	require.Len(t, sent, 1)
 	assert.Equal(t, "⏸️ Step **Review** awaits approval → **Done**. Approve to move on, or post a message to request changes.", sent[0].Content)
-	assert.Equal(t, StepButtonID("s1", "review"), buttons(sent[0])[0].CustomID)
+	step, posted, err := f.st.StepApproval(context.Background(), "t1")
+	require.NoError(t, err)
+	require.True(t, posted)
+	assert.NotEmpty(t, step.Nonce)
+	assert.Equal(t, StepButtonID("s1", StepKey("review", "done"), step.Nonce), buttons(sent[0])[0].CustomID)
+	assert.LessOrEqual(t, len(StepButtonID("e7d1e2c4-0b8f-4a57-9f3e-6d1a2b3c4d5e", StepKey("review", "done"), step.Nonce)), 100)
 
 	awaiting = false
 	f.sync(t, idle)
 	assert.Contains(t, f.api.SentMessages(f.rec.ChannelID)[0].Content, "No longer pending.")
-	_, posted, err := f.st.StepApproval(context.Background(), "t1")
+	_, posted, err = f.st.StepApproval(context.Background(), "t1")
 	require.NoError(t, err)
 	assert.False(t, posted)
+}
+
+func TestUnresolvedStepPromptIsRetriedBeforeANewOne(t *testing.T) {
+	f := newFixture(t)
+	to := "done"
+	f.host.StepFn = func(q pluginsdk.ExactStepApprovalQuery) (pluginsdk.StepApproval, error) {
+		return pluginsdk.StepApproval{SessionID: q.SessionID, TaskID: "t1", Awaiting: true,
+			FromStepID: "review", FromStepName: "Review", ToStepID: to, ToStepName: to}, nil
+	}
+	idle := pluginsdk.Session{ID: "s1", State: "WAITING_FOR_INPUT"}
+	f.sync(t, idle)
+	first := f.api.SentMessages(f.rec.ChannelID)[0]
+
+	to = "deploy"
+	f.api.FailNext("MessageEdit", &discordapi.Error{Status: 503})
+	require.Error(t, f.p.Sync(context.Background(), f.task, f.rec, []pluginsdk.Session{idle}))
+	step, posted, _ := f.st.StepApproval(context.Background(), "t1")
+	require.True(t, posted, "kept until its buttons are gone")
+	assert.Equal(t, first.ID, step.MessageID)
+	assert.NotEmpty(t, buttons(f.api.Message(f.rec.ChannelID, first.ID)), "still live in Discord")
+
+	f.sync(t, idle)
+	assert.Empty(t, f.api.Message(f.rec.ChannelID, first.ID).Components, "the retry removed the old buttons")
+	sent := f.api.SentMessages(f.rec.ChannelID)
+	assert.Contains(t, sent[len(sent)-1].Content, "**deploy**")
 }
 
 func TestOfficeStageAndRunningSessionsPostNoStepPrompt(t *testing.T) {

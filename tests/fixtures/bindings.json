@@ -1,0 +1,20 @@
+[
+  {
+    "name": "newline and comma separated with whitespace",
+    "input": " ws-a = 223456789012345678\r\n,ws-b=323456789012345678\n",
+    "bindings": [["ws-a", "223456789012345678"], ["ws-b", "323456789012345678"]],
+    "problems": 0
+  },
+  { "name": "empty", "input": "", "bindings": [], "problems": 1 },
+  { "name": "only separators", "input": "  \n , ", "bindings": [], "problems": 1 },
+  { "name": "missing separator", "input": "ws-a 223456789012345678", "bindings": [], "problems": 1 },
+  { "name": "space inside the workspace id", "input": "my ws=223456789012345678", "bindings": [], "problems": 1 },
+  { "name": "tab inside the workspace id", "input": "my\tws=223456789012345678", "bindings": [], "problems": 1 },
+  { "name": "non snowflake server", "input": "ws-a=general", "bindings": [], "problems": 1 },
+  {
+    "name": "duplicates are reported, the first binding kept",
+    "input": "ws-a=general,ws-a=223456789012345678,ws-a=323456789012345678,ws-c=223456789012345678",
+    "bindings": [["ws-a", "223456789012345678"]],
+    "problems": 3
+  }
+]

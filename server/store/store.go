@@ -65,13 +65,29 @@ type Guild struct {
 
 // Cursor is the outbound position: the newest posted message's timestamp
 // and every posted message ID at exactly that timestamp (tie-break).
-// PartialID and PartsSent record a message whose chunks were only partly
-// posted, so a retry resumes after the last delivered chunk.
+//
+// PartialID, PartialChannelID, and PartsSent record a message whose chunks
+// were only partly posted to that channel, so a retry resumes after the
+// last delivered chunk. Sending marks that part PartsSent was being sent
+// when the record was saved: its outcome is unknown, and a retry first
+// looks for it after LastPostID (the last part known to be posted).
 type Cursor struct {
-	CreatedAt string   `json:"created_at,omitempty"`
-	IDs       []string `json:"ids,omitempty"`
-	PartialID string   `json:"partial_id,omitempty"`
-	PartsSent int      `json:"parts_sent,omitempty"`
+	CreatedAt        string   `json:"created_at,omitempty"`
+	IDs              []string `json:"ids,omitempty"`
+	PartialID        string   `json:"partial_id,omitempty"`
+	PartialChannelID string   `json:"partial_channel_id,omitempty"`
+	PartsSent        int      `json:"parts_sent,omitempty"`
+	Sending          bool     `json:"sending,omitempty"`
+	LastPostID       string   `json:"last_post_id,omitempty"`
+}
+
+// Creation is what a `creating` record asked Discord for, so a retry can
+// recognize the channel a lost write left behind even after a rename.
+type Creation struct {
+	Name  string    `json:"name"`
+	Topic string    `json:"topic"`
+	Title string    `json:"title"`
+	At    time.Time `json:"at"`
 }
 
 // Channel is task/<id>/channel: the task's Discord channel and sync state.
@@ -96,6 +112,7 @@ type Channel struct {
 	ClosedAt        time.Time         `json:"closed_at,omitzero"`
 	DeleteAfter     time.Time         `json:"delete_after,omitzero"`
 	LastError       string            `json:"last_error,omitempty"`
+	Creation        *Creation         `json:"creation,omitempty"`
 	UpdatedAt       time.Time         `json:"updated_at"`
 }
 
@@ -115,10 +132,13 @@ type Prompts struct {
 }
 
 // StepApproval is task/<id>/step_approval: at most one posted prompt.
+// Nonce identifies the posted prompt in its button, so a button of an
+// earlier prompt never approves a later visit to the same step.
 type StepApproval struct {
 	SessionID  string    `json:"session_id"`
 	FromStepID string    `json:"from_step_id"`
 	ToStepID   string    `json:"to_step_id"`
+	Nonce      string    `json:"nonce,omitempty"`
 	MessageID  string    `json:"discord_message_id"`
 	PostedAt   time.Time `json:"posted_at"`
 }

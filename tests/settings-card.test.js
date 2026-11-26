@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 
 let importCount = 0;
 
@@ -62,19 +63,18 @@ test("invite URL preselects the bound server", async () => {
   assert.equal(url.searchParams.get("scope"), "bot applications.commands");
 });
 
-test("parseBindings mirrors backend validation", async () => {
+test("parseBindings matches the backend on the shared fixture", async () => {
   const { mod } = await loadBundle();
-  const ok = mod.parseBindings(" ws-a = 223456789012345678\r\nws-b=323456789012345678 ");
-  assert.deepEqual(ok, {
-    bindings: [
-      { workspaceId: "ws-a", guildId: "223456789012345678" },
-      { workspaceId: "ws-b", guildId: "323456789012345678" },
-    ],
-    problems: [],
-  });
-  const bad = mod.parseBindings("ws-a=general,ws-a=223456789012345678,ws-a=323456789012345678,ws-c=223456789012345678");
-  assert.equal(bad.bindings.length, 1);
-  assert.equal(bad.problems.length, 3);
+  const cases = JSON.parse(await readFile(new URL("./fixtures/bindings.json", import.meta.url), "utf8"));
+  for (const c of cases) {
+    const got = mod.parseBindings(c.input);
+    assert.deepEqual(
+      got.bindings.map((b) => [b.workspaceId, b.guildId]),
+      c.bindings,
+      c.name,
+    );
+    assert.equal(got.problems.length, c.problems, c.name);
+  }
 });
 
 test("gatewaySummary explains the cached bridge state", async () => {

@@ -27,15 +27,13 @@ func (b *Bridge) reconcileLoop(ctx context.Context) {
 	}
 }
 
-// reconcileAll reconciles every provisioned workspace and retries
-// provisioning of bound guilds that failed or ran before READY.
+// reconcileAll provisions (idempotently: it repairs deleted categories,
+// roles, and #kandev-status) and reconciles every bound guild the bot is in
+// once its identity is known.
 func (b *Bridge) reconcileAll() {
 	for _, binding := range b.cfg.Bindings {
-		if _, ok := b.guild(binding.WorkspaceID); ok {
-			b.sched.Do("guild:"+binding.GuildID, func(ctx context.Context) { b.reconcileWorkspace(ctx, binding, false) })
-			continue
-		}
-		if b.isMember(binding.WorkspaceID) && b.botID() != "" {
+		_, known := b.guild(binding.WorkspaceID)
+		if known || (b.isMember(binding.WorkspaceID) && b.botID() != "") {
 			b.sched.Do("guild:"+binding.GuildID, func(ctx context.Context) { b.provisionAndReconcile(ctx, binding) })
 		}
 	}
@@ -45,9 +43,10 @@ func (b *Bridge) reconcileAll() {
 // a channel, and for every indexed channel whose task vanished. Channels
 // missing from the guild (deleted while the bridge was offline) are marked
 // deleted first, so the sync recreates them. Syncs are idempotent, so an
-// unchanged workspace causes no Discord mutation. After a READY it also
-// queues the inbound catch-up of each channel, after its sync.
-func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding, afterReady bool) {
+// unchanged workspace causes no Discord mutation. Channels that have not
+// caught up since the last READY (or since a failed delivery) get their
+// inbound catch-up queued, after their sync.
+func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding) {
 	tasks, err := b.host.ListTasks(ctx, binding.WorkspaceID, b.cfg.IncludeEphemeralTasks)
 	if err != nil {
 		log.Printf("discord: reconcile workspace %s: listing tasks: %v", binding.WorkspaceID, err)
@@ -93,7 +92,7 @@ func (b *Bridge) reconcileWorkspace(ctx context.Context, binding config.Binding,
 		if !seen[ix.TaskID] || ix.GuildID != binding.GuildID {
 			b.Kick(ix.TaskID) // task gone, or a channel of a former binding
 		}
-		if afterReady && ix.GuildID == binding.GuildID {
+		if ix.GuildID == binding.GuildID && b.needsCatchUp(channelID) {
 			b.catchUp(ix.TaskID, channelID)
 		}
 	}

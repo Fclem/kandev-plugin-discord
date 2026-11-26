@@ -265,6 +265,20 @@ Wave 7:
   retry; unknown authority does not advance the inbound cursor; terminal
   tasks flush before closing; message parts checkpoint; transport errors
   are URL-redacted; failed pins retry.
+- Adversarial review round 2 (16 findings) fixed: nothing posts to a
+  channel until its overwrites match the current roles, and a closing
+  channel waits for its final output; step buttons bind the transition and
+  the posted prompt; a failed live delivery or an unfinished READY catch-up
+  is retried from the saved cursor before later messages; provisioning
+  shares the category lock and re-runs each reconcile, and deleted
+  categories are replaced; creation adopts by the persisted request (name,
+  topic, time, unowned); outbound parts save a send intent and look for an
+  interrupted part before resending; partial progress is per channel;
+  prompt buttons stay recorded until their edit succeeds; an op 9
+  re-identify beyond the budget is refused before it is sent; `/status`
+  and command replies fit 2000 characters; the settings card and backend
+  share a bindings fixture; `#kandev-status` gets connect, outage, and
+  provisioning notices.
 
 ## Risks
 

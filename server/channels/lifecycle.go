@@ -3,6 +3,8 @@ package channels
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +45,9 @@ type Manager struct {
 	// SaveIntent persists the record before a channel is created, so a lost
 	// write after creation is recovered by adopting the channel on retry.
 	SaveIntent func(ctx context.Context, rec store.Channel) error
+	// Owner returns the task a channel is routed to, if any; adoption never
+	// takes another task's channel.
+	Owner func(ctx context.Context, channelID string) (taskID string, found bool, err error)
 	// Note posts one line to the guild's #kandev-status.
 	Note func(ctx context.Context, g store.Guild, text string)
 }
@@ -94,7 +99,7 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		if !want {
 			return m.close(ctx, in)
 		}
-		res, err := m.converge(ctx, in, false)
+		res, err := m.Converge(ctx, in, false)
 		if err != nil || res.Rec.Status != store.StatusActive {
 			return res, err
 		}
@@ -108,7 +113,7 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		if !rec.DeleteAfter.IsZero() && !in.Now.Before(rec.DeleteAfter) {
 			return m.remove(ctx, in, "retention period ended")
 		}
-		res, err := m.converge(ctx, in, true)
+		res, err := m.Converge(ctx, in, true)
 		if err != nil || res.Rec.Status != store.StatusArchived {
 			return res, err
 		}
@@ -137,9 +142,10 @@ func (m *Manager) topic(in Input) string {
 	return Topic(in.Task, in.ParentIdentifier, m.Config.TaskURL(in.Task.ID))
 }
 
-// converge rewrites a channel's overwrites after the operator or viewer
-// role changed, so a former operator role loses access.
-func (m *Manager) converge(ctx context.Context, in Input, readOnly bool) (Result, error) {
+// Converge rewrites a channel's overwrites after the operator or viewer
+// role changed, so a former operator role loses access. Nothing may be
+// posted to an active channel until its RolesKey matches the guild's.
+func (m *Manager) Converge(ctx context.Context, in Input, readOnly bool) (Result, error) {
 	rec := in.Rec
 	key := RolesKey(in.Guild)
 	if rec.RolesKey == key {
@@ -194,42 +200,49 @@ func workspaceOf(in Input) string {
 	return in.Rec.WorkspaceID
 }
 
+// create makes the task's channel. Before asking Discord it saves the
+// record as `creating` with what it asks for (name, topic, time), so a
+// retry after a lost record write adopts the channel Discord made, even if
+// the task was renamed meanwhile, instead of creating a duplicate.
 func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 	prev := in.Rec
 	rec := prev
 	rec.TaskID, rec.WorkspaceID, rec.GuildID = in.Task.ID, in.Task.WorkspaceID, in.Guild.GuildID
 	rec.UpdatedAt = in.Now
-	name := Name(in.Task)
-	if prev.Status != store.StatusCreating && m.SaveIntent != nil {
-		intent := rec
-		intent.Status = store.StatusCreating
-		if err := m.SaveIntent(ctx, intent); err != nil {
-			return Result{Rec: prev}, fmt.Errorf("saving creation intent: %w", err)
-		}
-	}
+	want := store.Creation{Name: Name(in.Task), Topic: m.topic(in), Title: in.Task.Title, At: in.Now}
+	made := want
 	var ch *discordgo.Channel
 	err := m.place(ctx, in, func(p *placement) error {
-		if prev.Status == store.StatusCreating {
-			// A previous attempt may have created the channel and lost the
-			// record write: adopt it instead of creating a duplicate.
-			ch = p.adoptable(name)
-			if ch != nil {
-				return nil
+		if prev.Status == store.StatusCreating && prev.Creation != nil {
+			found, err := p.adoptable(ctx, *prev.Creation, in.Task.ID)
+			if err != nil || found != nil {
+				ch, made = found, *prev.Creation
+				return err
 			}
 		}
 		parent, err := p.categoryWithRoom(ctx, workspaceOf(in), false)
 		if err != nil {
 			return err
 		}
+		if m.SaveIntent != nil {
+			intent := rec
+			// No channel yet: a former (deleted) channel must not be routed.
+			intent.ChannelID, intent.Status, intent.Creation = "", store.StatusCreating, &want
+			if err := m.SaveIntent(ctx, intent); err != nil {
+				return fmt.Errorf("saving creation intent: %w", err)
+			}
+		}
 		ch, err = m.API.GuildChannelCreate(ctx, p.guild.GuildID, discordgo.GuildChannelCreateData{
-			Name: name, Type: discordgo.ChannelTypeGuildText, Topic: m.topic(in),
+			Name: want.Name, Type: discordgo.ChannelTypeGuildText, Topic: want.Topic,
 			ParentID: parent, PermissionOverwrites: provision.TaskOverwrites(m.roles(p.guild)),
 		})
 		return err
 	})
 	if err == nil {
-		rec.ChannelID, rec.Status, rec.LastError = ch.ID, store.StatusActive, ""
-		rec.SyncedTitle, rec.SyncedTopic, rec.LastRenamedAt = in.Task.Title, m.topic(in), time.Time{}
+		rec.ChannelID, rec.Status, rec.LastError, rec.Creation = ch.ID, store.StatusActive, "", nil
+		// An adopted channel carries the name and topic of the original
+		// request; rename converges it to the current title.
+		rec.SyncedTitle, rec.SyncedTopic, rec.LastRenamedAt = made.Title, made.Topic, time.Time{}
 		rec.RolesKey = RolesKey(in.Guild)
 		rec.InboundCursor, rec.InboundInflight = ch.ID, ""
 		rec.CardMessageID, rec.CardHash, rec.CardPinned = "", "", false
@@ -240,8 +253,13 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		if prev.Status == store.StatusDeleted && prev.ChannelID != "" && m.Note != nil {
 			m.Note(ctx, in.Guild, fmt.Sprintf("Recreated the channel of %s (#%s) after it was deleted in Discord.", label(in.Task), ch.Name))
 		}
-		return Result{Rec: rec, Changed: true}, nil
+		res := Result{Rec: rec, Changed: true}
+		if made.Title != in.Task.Title {
+			res.RetryAfter = time.Second // rename the adopted channel promptly
+		}
+		return res, nil
 	}
+	rec.Creation = nil // the outcomes below are definite: nothing was created
 	switch {
 	case discordapi.HasCode(err, discordapi.CodeMaxGuildChannels):
 		rec.Status, rec.LastError = store.StatusCapacityBlocked, "the server reached Discord's 500-channel limit"
@@ -253,23 +271,39 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		rec.Status, rec.LastError = store.StatusFailed, err.Error()
 		return Result{Rec: rec, Changed: true}, nil
 	}
+	// Unknown outcome: the saved intent (if any) lets the retry adopt.
 	return Result{Rec: prev}, fmt.Errorf("creating channel: %w", err)
 }
 
-// adoptable finds a text channel with the task's channel name in one of the
-// plugin's task categories.
-func (p *placement) adoptable(name string) *discordgo.Channel {
-	for _, c := range p.channels {
-		if c.Type != discordgo.ChannelTypeGuildText || c.Name != name {
+// adoptSkew tolerates clock skew between this host and Discord's IDs.
+const adoptSkew = time.Minute
+
+// adoptable finds the channel an earlier attempt asked Discord for: a text
+// channel in a plugin task category with the requested name and topic,
+// created after the request, and not routed to another task.
+func (p *placement) adoptable(ctx context.Context, c store.Creation, taskID string) (*discordgo.Channel, error) {
+	for _, ch := range p.channels {
+		if ch.Type != discordgo.ChannelTypeGuildText || ch.Name != c.Name || strings.TrimSpace(ch.Topic) != strings.TrimSpace(c.Topic) {
 			continue
 		}
-		for _, cat := range p.guild.TaskCategoryIDs {
-			if c.ParentID == cat {
-				return c
+		if !slices.Contains(p.guild.TaskCategoryIDs, ch.ParentID) {
+			continue
+		}
+		if created, err := discordgo.SnowflakeTimestamp(ch.ID); err != nil || created.Before(c.At.Add(-adoptSkew)) {
+			continue
+		}
+		if p.m.Owner != nil {
+			owner, found, err := p.m.Owner(ctx, ch.ID)
+			if err != nil {
+				return nil, fmt.Errorf("checking channel ownership: %w", err)
+			}
+			if found && owner != taskID {
+				continue
 			}
 		}
+		return ch, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func initialCursor(task *pluginsdk.Task, now time.Time) string {
@@ -363,7 +397,9 @@ func (m *Manager) remove(ctx context.Context, in Input, why string) (Result, err
 
 // categoryWithRoom returns a task (or archive) category with fewer than 50
 // channels, creating the next one ("Kandev Tasks 2", …) when all are full.
-// The caller holds the category lock.
+// Categories deleted in Discord are dropped from the record first, so
+// creation never targets a parent that no longer exists. The caller holds
+// the category lock.
 func (p *placement) categoryWithRoom(ctx context.Context, workspaceID string, archive bool) (string, error) {
 	m, g := p.m, p.guild
 	ids, base, overwrites := g.TaskCategoryIDs, provision.TaskCategoryName, provision.TaskOverwrites(m.roles(g))
@@ -371,30 +407,46 @@ func (p *placement) categoryWithRoom(ctx context.Context, workspaceID string, ar
 		ids, base, overwrites = g.ArchiveCategoryIDs, provision.ArchiveCategoryName, provision.ReadOnlyOverwrites(m.roles(g))
 	}
 	counts := map[string]int{}
+	isCategory := map[string]bool{}
 	for _, c := range p.channels {
 		counts[c.ParentID]++
-	}
-	for _, id := range ids {
-		if counts[id] < CategoryCapacity {
-			return id, nil
+		if c.Type == discordgo.ChannelTypeGuildCategory {
+			isCategory[c.ID] = true
 		}
 	}
-	ch, err := provision.CreateCategory(ctx, m.API, g.GuildID, fmt.Sprintf("%s %d", base, len(ids)+1), overwrites)
+	kept := slices.DeleteFunc(slices.Clone(ids), func(id string) bool { return !isCategory[id] })
+	for _, id := range kept {
+		if counts[id] < CategoryCapacity {
+			if len(kept) == len(ids) {
+				return id, nil
+			}
+			return id, p.saveCategories(ctx, workspaceID, archive, kept)
+		}
+	}
+	name := base
+	if len(kept) > 0 {
+		name = fmt.Sprintf("%s %d", base, len(kept)+1)
+	}
+	ch, err := provision.CreateCategory(ctx, m.API, g.GuildID, name, overwrites)
 	if err != nil {
 		return "", err
 	}
+	return ch.ID, p.saveCategories(ctx, workspaceID, archive, append(kept, ch.ID))
+}
+
+// saveCategories stores a new task (or archive) category list.
+func (p *placement) saveCategories(ctx context.Context, workspaceID string, archive bool, ids []string) error {
+	g := p.guild
 	if archive {
-		g.ArchiveCategoryIDs = append(append([]string(nil), ids...), ch.ID)
+		g.ArchiveCategoryIDs = ids
 	} else {
-		g.TaskCategoryIDs = append(append([]string(nil), ids...), ch.ID)
+		g.TaskCategoryIDs = ids
 	}
 	p.guild = g
-	if m.SaveGuild != nil {
-		if err := m.SaveGuild(ctx, workspaceID, g); err != nil {
-			return "", err
-		}
+	if p.m.SaveGuild == nil {
+		return nil
 	}
-	return ch.ID, nil
+	return p.m.SaveGuild(ctx, workspaceID, g)
 }
 
 func label(t *pluginsdk.Task) string {

@@ -35,8 +35,8 @@ func (c *call) approve(ctx context.Context, taskID, request string, allow bool) 
 		c.respondPermission(ctx, taskID, strings.TrimPrefix(request, requestPermission), pick)
 		return
 	case strings.HasPrefix(request, requestStep) && allow:
-		session, fromStep, _ := strings.Cut(strings.TrimPrefix(request, requestStep), ":")
-		c.approveStep(ctx, taskID, session, fromStep)
+		session, stepKey, _ := strings.Cut(strings.TrimPrefix(request, requestStep), ":")
+		c.approveStep(ctx, taskID, session, stepKey, "")
 		return
 	case request != "":
 		c.reply(ctx, "Pick a request from the list.")
@@ -64,7 +64,7 @@ func (c *call) approve(ctx context.Context, taskID, request string, allow bool) 
 			c.reply(ctx, msgNothingAwaiting)
 			return
 		}
-		c.approveStep(ctx, taskID, session, "")
+		c.approveStep(ctx, taskID, session, "", "")
 	}
 }
 
@@ -208,10 +208,11 @@ func (c *call) respondPermission(ctx context.Context, taskID, interactionID stri
 }
 
 // approveStep approves the session's awaiting workflow step as the
-// caller's linked Kandev user, like the native Approve button. A non-empty
-// fromStepID (from a prompt button or autocomplete) must still be the
-// awaiting step; otherwise the prompt is stale and nothing is approved.
-func (c *call) approveStep(ctx context.Context, taskID, sessionID, fromStepID string) {
+// caller's linked Kandev user, like the native Approve button. A stepKey
+// (from a prompt button or autocomplete) must still name the awaiting
+// transition, and a prompt nonce must name the prompt currently posted;
+// otherwise the prompt is stale and nothing is approved.
+func (c *call) approveStep(ctx context.Context, taskID, sessionID, stepKey, nonce string) {
 	capability, refusal := c.capability(ctx)
 	if refusal != "" {
 		c.reply(ctx, refusal)
@@ -232,8 +233,17 @@ func (c *call) approveStep(ctx context.Context, taskID, sessionID, fromStepID st
 		c.Refresh(taskID)
 		return
 	}
-	if fromStepID != "" && approval.FromStepID != fromStepID {
-		c.reply(ctx, "That approval prompt is out of date: the task is in another step now. Nothing was approved; use the current prompt.")
+	stale := stepKey != "" && prompts.StepKey(approval.FromStepID, approval.ToStepID) != stepKey
+	if nonce != "" && !stale {
+		posted, found, err := c.Store.StepApproval(ctx, taskID)
+		if err != nil {
+			c.reply(ctx, "Kandev could not check this prompt right now; try again.")
+			return
+		}
+		stale = !found || posted.SessionID != sessionID || posted.Nonce != nonce
+	}
+	if stale {
+		c.reply(ctx, "That approval prompt is out of date. Nothing was approved; use the current prompt.")
 		c.Refresh(taskID)
 		return
 	}
@@ -260,7 +270,8 @@ func (c *call) approveStep(ctx context.Context, taskID, sessionID, fromStepID st
 		moved += " → **" + approval.ToStepName + "**"
 	}
 	c.reply(ctx, fmt.Sprintf("✅ %s, recorded in Kandev as %s via Discord.", moved, receipt.Actor.DisplayName))
-	c.markStep(taskID, sessionID, approval.FromStepID, fmt.Sprintf("✅ Approved by %s via %s.", receipt.Actor.DisplayName, viaName(receipt.Actor)))
+	approval.SessionID = sessionID
+	c.markStep(taskID, approval, fmt.Sprintf("✅ Approved by %s via %s.", receipt.Actor.DisplayName, viaName(receipt.Actor)))
 }
 
 // refusal maps a receipt or command outcome to a reply; resolved reports
@@ -334,7 +345,8 @@ func (c *call) poster() *prompts.Poster {
 }
 
 // markPrompt resolves a posted permission prompt and forgets it, on the
-// task's queue.
+// task's queue. A prompt whose buttons could not be removed stays recorded;
+// the sync resolves it later.
 func (c *call) markPrompt(taskID, interactionID, outcome string) {
 	c.OnTask(taskID, func(ctx context.Context) {
 		rec, found, err := c.Store.Channel(ctx, taskID)
@@ -348,8 +360,9 @@ func (c *call) markPrompt(taskID, interactionID, outcome string) {
 		kept := stored.Items[:0:0]
 		for _, p := range stored.Items {
 			if p.InteractionID == interactionID {
-				c.poster().Resolve(ctx, rec.ChannelID, p.MessageID, outcome)
-				continue
+				if err := c.poster().Resolve(ctx, rec.ChannelID, p.MessageID, outcome); err == nil {
+					continue
+				}
 			}
 			kept = append(kept, p)
 		}
@@ -360,19 +373,22 @@ func (c *call) markPrompt(taskID, interactionID, outcome string) {
 	c.Refresh(taskID)
 }
 
-// markStep resolves the posted step approval prompt for one session and
-// step and forgets it; a prompt for another step is left to the sync.
-func (c *call) markStep(taskID, sessionID, fromStepID, outcome string) {
+// markStep resolves the posted step approval prompt of the approved
+// transition and forgets it; a prompt for another transition, or one whose
+// buttons could not be removed, is left to the sync.
+func (c *call) markStep(taskID string, approval pluginsdk.StepApproval, outcome string) {
 	c.OnTask(taskID, func(ctx context.Context) {
 		rec, found, err := c.Store.Channel(ctx, taskID)
 		if err != nil || !found {
 			return
 		}
 		step, posted, err := c.Store.StepApproval(ctx, taskID)
-		if err != nil || !posted || step.SessionID != sessionID || step.FromStepID != fromStepID {
+		if err != nil || !posted || step.SessionID != approval.SessionID || step.FromStepID != approval.FromStepID || step.ToStepID != approval.ToStepID {
 			return
 		}
-		c.poster().Resolve(ctx, rec.ChannelID, step.MessageID, outcome)
+		if err := c.poster().Resolve(ctx, rec.ChannelID, step.MessageID, outcome); err != nil {
+			return
+		}
 		_ = c.Store.DeleteStepApproval(ctx, taskID)
 	})
 	c.Refresh(taskID)
