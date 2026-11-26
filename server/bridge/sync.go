@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"kandev-plugin-discord/server/channels"
 	"kandev-plugin-discord/server/discordapi"
 	"kandev-plugin-discord/server/kandev"
+	"kandev-plugin-discord/server/prompts"
 	"kandev-plugin-discord/server/store"
 )
 
@@ -123,6 +125,15 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	if res.RetryAfter > 0 {
 		b.kickAfter(taskID, res.RetryAfter)
 	}
+	if res.Rec.Status == store.StatusArchived {
+		// Pending prompts must not keep live buttons in a read-only channel;
+		// ones whose edit fails are retried on the next sync.
+		poster := &prompts.Poster{API: b.api, Host: b.host, Store: b.st, TaskURL: b.cfg.TaskURL, Now: b.now}
+		if err := poster.Close(ctx, taskID, res.Rec.ChannelID); err != nil {
+			log.Printf("discord: task %s: closing prompts: %v", taskID, err)
+			b.kickAfter(taskID, flushRetry)
+		}
+	}
 	if task == nil || res.Rec.Status != store.StatusActive {
 		return
 	}
@@ -133,11 +144,17 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	b.syncActive(ctx, task, res.Rec)
 }
 
+// closeHoldMax bounds how long a closing task's channel stays open waiting
+// for a session that keeps running.
+const closeHoldMax = 30 * time.Minute
+
 // flushBeforeClose posts a closing task's final answer and status under
 // converged permissions. It reports false when the close must wait: the
-// overwrites or the flush failed transiently, and the next sync retries
-// both. A flush Discord forbids (the bot lost access) cannot succeed later,
-// so the close goes ahead.
+// overwrites or the flush failed transiently, or a session still runs (its
+// last message may still grow), and the next sync retries. A flush Discord
+// forbids (the bot lost access) cannot succeed later, and a session still
+// running closeHoldMax after the task closed is not waited for longer, so
+// the close goes ahead.
 func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, task *pluginsdk.Task, in channels.Input) (store.Channel, bool) {
 	res, err := mgr.Converge(ctx, in, false)
 	if res.Changed {
@@ -160,9 +177,26 @@ func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, ta
 	case discordapi.IsForbidden(err):
 		log.Printf("discord: task %s: closing without its final output: %v", task.ID, err)
 		return next, true
+	case errors.Is(err, errSessionRunning) && b.now().Sub(closedAt(task)) > closeHoldMax:
+		log.Printf("discord: task %s: closing although a session still runs", task.ID)
+		return next, true
 	}
 	log.Printf("discord: task %s: holding the close until its final output posts: %v", task.ID, err)
 	return next, false
+}
+
+// closedAt is when a task stopped wanting a channel, as well as Kandev
+// says: completion, archive, or the last update.
+func closedAt(task *pluginsdk.Task) time.Time {
+	for _, s := range []*string{task.ArchivedAt, task.CompletedAt, &task.UpdatedAt} {
+		if s == nil {
+			continue
+		}
+		if t, err := time.Parse(time.RFC3339Nano, *s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // retire detaches a record from a guild the workspace is no longer bound

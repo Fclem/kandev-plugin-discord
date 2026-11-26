@@ -2,11 +2,12 @@ package outbound
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"maps"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -108,7 +109,7 @@ func (m *Mirror) pull(ctx context.Context, task *pluginsdk.Task, rec *store.Chan
 		} else {
 			c.CreatedAt, c.IDs, cursorAt = msg.CreatedAt, []string{msg.ID}, at
 		}
-		c.PartialID, c.PartialChannelID, c.PartsSent, c.Sending = "", "", 0, false
+		c.PartialID, c.PartialChannelID, c.PartsSent = "", "", 0
 		if post {
 			if err := m.save(ctx, *rec); err != nil {
 				return fmt.Errorf("saving cursor: %w", err)
@@ -132,44 +133,25 @@ func Parts(text, url string) []string {
 	return chunks
 }
 
-// post sends one message's parts to the record's channel. The record is
-// saved with Sending set before each part and with the part counted after
-// it, so a retry resumes after the delivered parts; a part whose outcome
-// is unknown (crash, lost response) is first looked up in the channel, so
-// no part is posted twice. Progress made for another channel is discarded:
+// post sends one message's parts to the record's channel, counting each
+// delivered part in the record (saved), so a retry resumes after them.
+// Each part carries a nonce derived from the channel, message, and part
+// and Discord enforces it: a part whose reply was lost (or whose count was
+// not saved before a restart) is not posted again when retried within
+// Discord's nonce window. Progress made for another channel is discarded:
 // a replacement channel gets the whole message. The caller saves after the
 // last part, together with the cursor.
 func (m *Mirror) post(ctx context.Context, rec *store.Channel, msgID string, parts []string) error {
 	c := &rec.OutboundCursor
 	if c.PartialID != msgID || c.PartialChannelID != rec.ChannelID {
-		c.PartialID, c.PartialChannelID, c.PartsSent, c.Sending = msgID, rec.ChannelID, 0, false
+		c.PartialID, c.PartialChannelID, c.PartsSent = msgID, rec.ChannelID, 0
 	}
 	for c.PartsSent < len(parts) {
-		part := parts[c.PartsSent]
-		if c.Sending {
-			id, found, err := m.findPosted(ctx, rec.ChannelID, c.LastPostID, part)
-			if err != nil {
-				return fmt.Errorf("checking an interrupted post: %w", err)
-			}
-			if found {
-				c.PartsSent, c.Sending, c.LastPostID = c.PartsSent+1, false, id
-				if err := m.save(ctx, *rec); err != nil {
-					return fmt.Errorf("saving message progress: %w", err)
-				}
-				continue
-			}
-		} else {
-			c.Sending = true
-			if err := m.save(ctx, *rec); err != nil {
-				c.Sending = false
-				return fmt.Errorf("saving message progress: %w", err)
-			}
-		}
-		sent, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Content: part})
-		if err != nil {
+		nonce := PartNonce(rec.ChannelID, msgID, c.PartsSent)
+		if _, err := m.API.MessageSendOnce(ctx, rec.ChannelID, parts[c.PartsSent], nonce); err != nil {
 			return fmt.Errorf("posting message part %d: %w", c.PartsSent+1, err)
 		}
-		c.PartsSent, c.Sending, c.LastPostID = c.PartsSent+1, false, sent.ID
+		c.PartsSent++
 		if c.PartsSent < len(parts) {
 			if err := m.save(ctx, *rec); err != nil {
 				return fmt.Errorf("saving message progress: %w", err)
@@ -179,23 +161,11 @@ func (m *Mirror) post(ctx context.Context, rec *store.Channel, msgID string, par
 	return nil
 }
 
-// findPosted looks for a bot message with exactly this content after the
-// last part known to be posted (or anywhere in the channel).
-func (m *Mirror) findPosted(ctx context.Context, channelID, afterID, content string) (string, bool, error) {
-	if afterID == "" {
-		afterID = channelID // a channel's ID predates its messages
-	}
-	msgs, err := m.API.ChannelMessages(ctx, channelID, 100, afterID)
-	if err != nil {
-		return "", false, err
-	}
-	want := strings.TrimSpace(content)
-	for _, msg := range msgs {
-		if msg.Author != nil && msg.Author.Bot && strings.TrimSpace(msg.Content) == want {
-			return msg.ID, true, nil
-		}
-	}
-	return "", false, nil
+// PartNonce identifies one part of one Kandev message in one channel, in
+// Discord's 25-character nonce limit.
+func PartNonce(channelID, msgID string, part int) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00%s\x00%d", channelID, msgID, part))
+	return hex.EncodeToString(sum[:12])
 }
 
 func (m *Mirror) save(ctx context.Context, rec store.Channel) error {

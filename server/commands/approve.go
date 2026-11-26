@@ -210,8 +210,9 @@ func (c *call) respondPermission(ctx context.Context, taskID, interactionID stri
 // approveStep approves the session's awaiting workflow step as the
 // caller's linked Kandev user, like the native Approve button. A stepKey
 // (from a prompt button or autocomplete) must still name the awaiting
-// transition, and a prompt nonce must name the prompt currently posted;
-// otherwise the prompt is stale and nothing is approved.
+// transition, and a prompt nonce must name the prompt currently posted for
+// the current approval state (its ResourceVersion); otherwise the prompt
+// is stale and nothing is approved.
 func (c *call) approveStep(ctx context.Context, taskID, sessionID, stepKey, nonce string) {
 	capability, refusal := c.capability(ctx)
 	if refusal != "" {
@@ -240,7 +241,7 @@ func (c *call) approveStep(ctx context.Context, taskID, sessionID, stepKey, nonc
 			c.reply(ctx, "Kandev could not check this prompt right now; try again.")
 			return
 		}
-		stale = !found || posted.SessionID != sessionID || posted.Nonce != nonce
+		stale = !found || posted.SessionID != sessionID || posted.Nonce != nonce || posted.ResourceVersion != approval.ResourceVersion
 	}
 	if stale {
 		c.reply(ctx, "That approval prompt is out of date. Nothing was approved; use the current prompt.")

@@ -81,3 +81,23 @@
 - The settings card rejects the same bindings the backend rejects.
 - `#kandev-status` announces connection, outages, and provisioning failures.
 - Messages from the first second of a new channel's backlog are mirrored.
+
+### Fixed (adversarial review round 3)
+
+- A channel adopted after a lost save, or a guild whose re-provisioning
+  failed after a role change, never shows output to the former role.
+- A live message whose route could not be read is retried from history
+  before later messages.
+- Long messages carry an enforced nonce per part, and creations are never
+  resent blindly by the Discord library, so a retry cannot duplicate a
+  message, channel, or role nor mistake an earlier identical line for it.
+- A closing channel waits for running sessions to finish their answer (up
+  to 30 minutes).
+- An Approve button refreshes when the approval state changes, so an old
+  button cannot approve a later visit to the same step.
+- A task closed while its channel creation was unrecorded archives that
+  channel; archived channels lose their prompt buttons even after a failed
+  edit.
+- `#kandev-status` no longer announces a reconnect while the gateway is
+  still down.
+- Messages split at a code fence never exceed 2000 characters.

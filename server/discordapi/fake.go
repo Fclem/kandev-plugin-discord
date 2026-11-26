@@ -46,6 +46,7 @@ type Fake struct {
 	calls     []Call
 	errs      map[string][]error
 	lostReply map[string]int
+	nonces    map[string]*discordgo.Message // channel + nonce → first message
 	nextID    uint64
 }
 
@@ -65,6 +66,7 @@ func NewFake() *Fake {
 		Interactions: map[string][]any{},
 		errs:         map[string][]error{},
 		lostReply:    map[string]int{},
+		nonces:       map[string]*discordgo.Message{},
 		nextID:       1_000_000_000_000_000_000,
 	}
 }
@@ -386,6 +388,26 @@ func (f *Fake) MessageSend(_ context.Context, channelID string, data *discordgo.
 	if err := f.record("MessageSend", channelID, data); err != nil {
 		return nil, err
 	}
+	return f.postLocked(channelID, data, "")
+}
+
+// MessageSendOnce is recorded (and fails) as MessageSend, so tests see one
+// kind of post. A repeated nonce returns the first message, like Discord's
+// enforce_nonce within its window.
+func (f *Fake) MessageSendOnce(_ context.Context, channelID, content, nonce string) (*discordgo.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data := &discordgo.MessageSend{Content: content}
+	if err := f.record("MessageSend", channelID, data); err != nil {
+		return nil, err
+	}
+	if m, ok := f.nonces[channelID+"\x00"+nonce]; ok {
+		return m, nil
+	}
+	return f.postLocked(channelID, data, nonce)
+}
+
+func (f *Fake) postLocked(channelID string, data *discordgo.MessageSend, nonce string) (*discordgo.Message, error) {
 	if _, ok := f.Channels[channelID]; !ok {
 		return nil, &Error{Status: 404, Code: CodeUnknownChannel, Message: "Unknown Channel"}
 	}
@@ -394,6 +416,9 @@ func (f *Fake) MessageSend(_ context.Context, channelID string, data *discordgo.
 		Components: data.Components, Author: f.BotUser, MessageReference: data.Reference,
 	}
 	f.Messages[channelID] = append(f.Messages[channelID], m)
+	if nonce != "" {
+		f.nonces[channelID+"\x00"+nonce] = m
+	}
 	if err := f.lost("MessageSend"); err != nil {
 		return nil, err
 	}

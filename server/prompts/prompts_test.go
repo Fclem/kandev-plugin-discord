@@ -177,6 +177,27 @@ func TestUnresolvedStepPromptIsRetriedBeforeANewOne(t *testing.T) {
 	assert.Contains(t, sent[len(sent)-1].Content, "**deploy**")
 }
 
+func TestStepPromptButtonRotatesWhenTheApprovalStateChanges(t *testing.T) {
+	f := newFixture(t)
+	version := "v1"
+	f.host.StepFn = func(q pluginsdk.ExactStepApprovalQuery) (pluginsdk.StepApproval, error) {
+		return pluginsdk.StepApproval{SessionID: q.SessionID, TaskID: "t1", Awaiting: true,
+			FromStepID: "review", FromStepName: "Review", ToStepID: "done", ToStepName: "Done", ResourceVersion: version}, nil
+	}
+	idle := pluginsdk.Session{ID: "s1", State: "WAITING_FOR_INPUT"}
+	f.sync(t, idle)
+	first, _, _ := f.st.StepApproval(context.Background(), "t1")
+
+	version = "v2" // a later visit to the same transition
+	f.sync(t, idle)
+	sent := f.api.SentMessages(f.rec.ChannelID)
+	require.Len(t, sent, 1, "no new message")
+	now, _, _ := f.st.StepApproval(context.Background(), "t1")
+	assert.Equal(t, "v2", now.ResourceVersion)
+	assert.NotEqual(t, first.Nonce, now.Nonce)
+	assert.Equal(t, StepButtonID("s1", StepKey("review", "done"), now.Nonce), buttons(sent[0])[0].CustomID, "the old button is gone")
+}
+
 func TestOfficeStageAndRunningSessionsPostNoStepPrompt(t *testing.T) {
 	f := newFixture(t)
 	f.host.StepFn = func(pluginsdk.ExactStepApprovalQuery) (pluginsdk.StepApproval, error) {

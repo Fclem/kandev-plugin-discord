@@ -134,11 +134,13 @@ func TestApproveAndDenyPickTheirDefaultOptions(t *testing.T) {
 	assert.Equal(t, "i2", f3.host.Responses[0].InteractionID)
 }
 
-func awaitingStep(f *fixture) {
+func awaitingStep(f *fixture) { awaitingStepAt(f, "sv-1") }
+
+func awaitingStepAt(f *fixture, version string) {
 	f.host.Sessions["t1"] = []pluginsdk.Session{{ID: "s1", State: "WAITING_FOR_INPUT"}}
 	f.host.StepFn = func(q pluginsdk.ExactStepApprovalQuery) (pluginsdk.StepApproval, error) {
 		return pluginsdk.StepApproval{SessionID: q.SessionID, TaskID: "t1", Awaiting: true,
-			FromStepID: "review", FromStepName: "Review", ToStepID: "done", ToStepName: "Done", ResourceVersion: "sv-1"}, nil
+			FromStepID: "review", FromStepName: "Review", ToStepID: "done", ToStepName: "Done", ResourceVersion: version}, nil
 	}
 }
 
@@ -184,7 +186,7 @@ func TestStepApprovalOutcomes(t *testing.T) {
 func reviewButton(t *testing.T, f *fixture) string {
 	t.Helper()
 	require.NoError(t, f.st.PutStepApproval(context.Background(), "t1", store.StepApproval{
-		SessionID: "s1", FromStepID: "review", ToStepID: "done", Nonce: "n1", MessageID: "m1",
+		SessionID: "s1", FromStepID: "review", ToStepID: "done", ResourceVersion: "sv-1", Nonce: "n1", MessageID: "m1",
 	}))
 	return prompts.StepButtonID("s1", prompts.StepKey("review", "done"), "n1")
 }
@@ -205,6 +207,11 @@ func TestStaleStepButtonsApproveNothing(t *testing.T) {
 	assert.Empty(t, f.host.Approvals)
 	assert.Contains(t, f.syncs, "t1", "the task is re-synced so the stale prompt is cleared")
 
+	awaitingStepAt(f, "sv-2") // a later visit to Review, before the prompt was refreshed
+	assert.Contains(t, f.run(f.button(opUser, current)), "out of date")
+	assert.Empty(t, f.host.Approvals)
+
+	awaitingStep(f)
 	f.run(f.button(opUser, current))
 	assert.Len(t, f.host.Approvals, 1)
 }

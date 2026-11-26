@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -247,6 +248,44 @@ func ResolvedText(it *pluginsdk.Interaction, actor *pluginsdk.InteractionActor) 
 	return "✅ Resolved elsewhere."
 }
 
+// closedText ends a prompt whose channel closed while it was pending.
+const closedText = "⏹️ The channel closed; answer in Kandev if this is still pending."
+
+// Close resolves every posted prompt of a closed (read-only) channel, so no
+// button stays live there. A prompt whose edit failed stays recorded, and
+// the next call retries it.
+func (p *Poster) Close(ctx context.Context, taskID, channelID string) error {
+	var errs []error
+	stored, err := p.Store.Prompts(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	kept := stored.Items[:0:0]
+	for _, pr := range stored.Items {
+		if err := p.Resolve(ctx, channelID, pr.MessageID, closedText); err != nil {
+			errs = append(errs, err)
+			kept = append(kept, pr)
+		}
+	}
+	if len(kept) != len(stored.Items) {
+		if err := p.Store.PutPrompts(ctx, taskID, store.Prompts{Items: kept}); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	step, posted, err := p.Store.StepApproval(ctx, taskID)
+	switch {
+	case err != nil:
+		errs = append(errs, err)
+	case posted:
+		if err := p.Resolve(ctx, channelID, step.MessageID, closedText); err != nil {
+			errs = append(errs, err)
+		} else if err := p.Store.DeleteStepApproval(ctx, taskID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Resolve appends an outcome to a prompt and removes its buttons. It
 // returns an error only when the prompt may still show live buttons; a
 // message or channel Discord no longer has counts as resolved.
@@ -297,17 +336,35 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 			return fmt.Errorf("reading step approval: %w", err)
 		}
 		if approval.Awaiting {
+			approval.SessionID = s.ID
 			awaiting = &approval
 			break
 		}
 	}
 	if posted && awaiting != nil && current.SessionID == awaiting.SessionID && current.FromStepID == awaiting.FromStepID && current.ToStepID == awaiting.ToStepID {
-		return nil
-	}
-	if posted {
+		if current.ResourceVersion == awaiting.ResourceVersion {
+			return nil
+		}
+		// Same transition at a new approval state (a later visit, or a
+		// session update): give the prompt a fresh button, silently, so the
+		// old one can no longer approve it.
+		nonce := newNonce()
+		buttons := stepButtons(*awaiting, nonce)
+		if _, err := p.API.MessageEdit(ctx, &discordgo.MessageEdit{Channel: rec.ChannelID, ID: current.MessageID, Components: &buttons}); err != nil {
+			if !discordapi.IsGone(err) {
+				return fmt.Errorf("refreshing step approval: %w", err)
+			}
+			// The prompt is gone: forget it and post a new one below.
+		} else {
+			current.ResourceVersion, current.Nonce = awaiting.ResourceVersion, nonce
+			return p.Store.PutStepApproval(ctx, task.ID, current)
+		}
+	} else if posted {
 		if err := p.Resolve(ctx, rec.ChannelID, current.MessageID, "⏹️ No longer pending."); err != nil {
 			return err
 		}
+	}
+	if posted {
 		if err := p.Store.DeleteStepApproval(ctx, task.ID); err != nil {
 			return err
 		}
@@ -321,20 +378,21 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 	}
 	text += ". Approve to move on, or post a message to request changes."
 	nonce := newNonce()
-	msg, err := p.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{
-		Content: text,
-		Components: rows([]discordgo.MessageComponent{discordgo.Button{
-			Label: "Approve", Style: discordgo.SuccessButton,
-			CustomID: StepButtonID(awaiting.SessionID, StepKey(awaiting.FromStepID, awaiting.ToStepID), nonce),
-		}}),
-	})
+	msg, err := p.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Content: text, Components: stepButtons(*awaiting, nonce)})
 	if err != nil {
 		return fmt.Errorf("posting step approval: %w", err)
 	}
 	return p.Store.PutStepApproval(ctx, task.ID, store.StepApproval{
 		SessionID: awaiting.SessionID, FromStepID: awaiting.FromStepID, ToStepID: awaiting.ToStepID,
-		Nonce: nonce, MessageID: msg.ID, PostedAt: p.Now(),
+		ResourceVersion: awaiting.ResourceVersion, Nonce: nonce, MessageID: msg.ID, PostedAt: p.Now(),
 	})
+}
+
+func stepButtons(a pluginsdk.StepApproval, nonce string) []discordgo.MessageComponent {
+	return rows([]discordgo.MessageComponent{discordgo.Button{
+		Label: "Approve", Style: discordgo.SuccessButton,
+		CustomID: StepButtonID(a.SessionID, StepKey(a.FromStepID, a.ToStepID), nonce),
+	}})
 }
 
 func newNonce() string {

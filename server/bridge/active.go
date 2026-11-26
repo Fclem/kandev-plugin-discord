@@ -80,8 +80,17 @@ func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store
 	if b.cfg.LiveUpdateInterval > 0 && anyRunning(sessions) {
 		b.kickAfter(task.ID, b.cfg.LiveUpdateInterval)
 	}
+	if flushErr == nil && anyRunning(sessions) {
+		// The newest agent message may still be growing (it was held
+		// back); output is complete only once every session stopped.
+		flushErr = errSessionRunning
+	}
 	return next, flushErr
 }
+
+// errSessionRunning reports that a session still runs, so the mirrored
+// output may be incomplete.
+var errSessionRunning = errors.New("a session is still running")
 
 func anyRunning(sessions []pluginsdk.Session) bool {
 	for _, s := range sessions {

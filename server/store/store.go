@@ -68,26 +68,24 @@ type Guild struct {
 //
 // PartialID, PartialChannelID, and PartsSent record a message whose chunks
 // were only partly posted to that channel, so a retry resumes after the
-// last delivered chunk. Sending marks that part PartsSent was being sent
-// when the record was saved: its outcome is unknown, and a retry first
-// looks for it after LastPostID (the last part known to be posted).
+// last delivered chunk.
 type Cursor struct {
 	CreatedAt        string   `json:"created_at,omitempty"`
 	IDs              []string `json:"ids,omitempty"`
 	PartialID        string   `json:"partial_id,omitempty"`
 	PartialChannelID string   `json:"partial_channel_id,omitempty"`
 	PartsSent        int      `json:"parts_sent,omitempty"`
-	Sending          bool     `json:"sending,omitempty"`
-	LastPostID       string   `json:"last_post_id,omitempty"`
 }
 
 // Creation is what a `creating` record asked Discord for, so a retry can
-// recognize the channel a lost write left behind even after a rename.
+// recognize the channel a lost write left behind even after a rename, and
+// knows the roles its overwrites were written for.
 type Creation struct {
-	Name  string    `json:"name"`
-	Topic string    `json:"topic"`
-	Title string    `json:"title"`
-	At    time.Time `json:"at"`
+	Name     string    `json:"name"`
+	Topic    string    `json:"topic"`
+	Title    string    `json:"title"`
+	RolesKey string    `json:"roles_key"`
+	At       time.Time `json:"at"`
 }
 
 // Channel is task/<id>/channel: the task's Discord channel and sync state.
@@ -132,15 +130,17 @@ type Prompts struct {
 }
 
 // StepApproval is task/<id>/step_approval: at most one posted prompt.
-// Nonce identifies the posted prompt in its button, so a button of an
-// earlier prompt never approves a later visit to the same step.
+// Nonce identifies the posted prompt in its button and ResourceVersion the
+// approval state it was posted (or last refreshed) for, so a button never
+// approves a state its prompt did not show.
 type StepApproval struct {
-	SessionID  string    `json:"session_id"`
-	FromStepID string    `json:"from_step_id"`
-	ToStepID   string    `json:"to_step_id"`
-	Nonce      string    `json:"nonce,omitempty"`
-	MessageID  string    `json:"discord_message_id"`
-	PostedAt   time.Time `json:"posted_at"`
+	SessionID       string    `json:"session_id"`
+	FromStepID      string    `json:"from_step_id"`
+	ToStepID        string    `json:"to_step_id"`
+	ResourceVersion string    `json:"resource_version,omitempty"`
+	Nonce           string    `json:"nonce,omitempty"`
+	MessageID       string    `json:"discord_message_id"`
+	PostedAt        time.Time `json:"posted_at"`
 }
 
 // BindingHealth is one binding's last observed state.

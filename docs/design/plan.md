@@ -279,6 +279,17 @@ Wave 7:
   and command replies fit 2000 characters; the settings card and backend
   share a bindings fixture; `#kandev-status` gets connect, outage, and
   provisioning notices.
+- Adversarial review round 3 (11 findings) fixed: an adopted channel keeps
+  the RolesKey of its creation (Converge gates it); provisioning stores a
+  role change before later steps and the bridge reloads it on failure; a
+  failed route read retries the channel from history; outbound parts use
+  `enforce_nonce` instead of a content lookup, and creations disable
+  discordgo's 502 resend; a closing channel waits for running sessions
+  (bounded); the step prompt's button rotates with the approval's
+  ResourceVersion; an unrecorded creation of a closed task is adopted and
+  closed; archived channels resolve their prompts with retries; outage
+  notices are not cleared by REST provisioning; the chunker reserves the
+  closing fence of a line that opens one.
 
 ## Risks
 

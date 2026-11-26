@@ -207,6 +207,21 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 			Commands: commands.Definitions(), CommandsHash: commands.DefinitionsHash(b.cfg.ApplicationID), Now: b.now(),
 		})
 	}
+	if err != nil && known {
+		// Provision stores a role change before its later steps: run on the
+		// stored record, so channels converge to the new roles and the
+		// former ones are trusted no longer.
+		stored, found, serr := b.st.Guild(ctx, binding.WorkspaceID)
+		b.mu.Lock()
+		switch {
+		case serr != nil:
+			// Roles unknown: hold the workspace rather than trust old ones.
+			delete(b.guilds, binding.WorkspaceID)
+		case found && stored.GuildID == binding.GuildID:
+			b.guilds[binding.WorkspaceID] = stored
+		}
+		b.mu.Unlock()
+	}
 	b.mu.Lock()
 	for i := range b.health.Bindings {
 		bh := &b.health.Bindings[i]

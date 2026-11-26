@@ -55,6 +55,18 @@ func TestChunkHardSplitsLongLinesOnRuneBoundaries(t *testing.T) {
 	}
 }
 
+func TestChunksNeverExceedTheLimitAroundFenceBoundaries(t *testing.T) {
+	for n := 1980; n <= 2010; n++ {
+		x := strings.Repeat("x", n)
+		for _, text := range []string{"```" + x, "```" + x + "\nmore", "```go\n" + x + "\n```", "a\n```" + x, "```\n" + x,
+			"```go\n" + x, "y\n```go\n" + x + "\n```\n" + x, "```go\n" + x + x + "\n```"} {
+			for _, c := range Chunk(text, 2000) {
+				require.LessOrEqual(t, len(c), 2000, "n=%d", n)
+			}
+		}
+	}
+}
+
 func TestChunkTerminatesOnHugeFenceOpenersAndLines(t *testing.T) {
 	text := "```" + strings.Repeat("x", 5000) + "\n" + strings.Repeat("code line\n", 1000) + "```"
 	done := make(chan []string, 1)
@@ -177,8 +189,7 @@ func TestMirrorPostsInOrderOnceAndAdvancesCursor(t *testing.T) {
 	assert.Equal(t, "2026-11-25T10:01:00Z", cur.CreatedAt)
 	assert.Equal(t, []string{"b", "c"}, cur.IDs)
 	assert.Empty(t, cur.PartialID)
-	assert.False(t, cur.Sending)
-	assert.Equal(t, 6, f.saves, "saved before (send intent) and after each posted message")
+	assert.Equal(t, 3, f.saves, "saved after each posted message")
 
 	f.api.ResetCalls()
 	f.sync(t, nil, now)
@@ -209,21 +220,29 @@ func TestMirrorTruncatesLongMessagesWithALink(t *testing.T) {
 	assert.Equal(t, "… truncated — open in Kandev: https://k/t/t1", texts[MaxChunks])
 }
 
-func TestLostReplyIsFoundInsteadOfRepostedAfterARestart(t *testing.T) {
+func TestLostReplyIsNotRepostedOnRetry(t *testing.T) {
 	f := newMirror(t)
-	var saved store.Channel
-	f.m.Save = func(_ context.Context, r store.Channel) error { saved = r; return nil }
 	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "Done.", CreatedAt: "2026-11-25T10:01:00Z"})
 	f.api.LoseNextReply("MessageSend")
 	_, _, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
 	require.Error(t, err)
-	require.True(t, saved.OutboundCursor.Sending, "the send intent was saved before posting")
 
-	f.rec = saved // a restart: only what was saved survives
-	f.sync(t, nil, time.Now())
-	assert.Equal(t, []string{"Done."}, f.texts(), "posted exactly once")
+	f.sync(t, nil, time.Now()) // the record is unchanged, as after a restart
+	assert.Equal(t, []string{"Done."}, f.texts(), "the part's nonce makes Discord return the first post")
 	assert.Equal(t, []string{"m1"}, f.rec.OutboundCursor.IDs)
-	assert.False(t, f.rec.OutboundCursor.Sending)
+}
+
+func TestFailedPartIsResentEvenIfTheChannelShowsTheSameText(t *testing.T) {
+	f := newMirror(t)
+	_, err := f.api.MessageSend(context.Background(), f.rec.ChannelID, &discordgo.MessageSend{Content: "Done."})
+	require.NoError(t, err)
+	f.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "t1", AuthorType: "agent", Type: "message", Content: "Done.", CreatedAt: "2026-11-25T10:01:00Z"})
+	f.api.FailNext("MessageSend", &discordapi.Error{Status: 500})
+	_, _, err = f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+
+	f.sync(t, nil, time.Now())
+	assert.Equal(t, []string{"Done.", "Done."}, f.texts(), "an earlier identical bot message is not mistaken for the part")
 }
 
 func TestPartialProgressDoesNotFollowTheTaskToANewChannel(t *testing.T) {

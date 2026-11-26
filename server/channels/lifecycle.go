@@ -87,6 +87,9 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 	switch rec.Status {
 	case "", store.StatusDeleted, store.StatusCapacityBlocked, store.StatusCreating:
 		if !want {
+			if rec.Status == store.StatusCreating && rec.Creation != nil {
+				return m.abandon(ctx, in)
+			}
 			return Result{Rec: rec}, nil
 		}
 		return m.create(ctx, in)
@@ -123,6 +126,37 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		return res, nil
 	}
 	return Result{Rec: rec}, nil
+}
+
+// abandon settles a creation whose task closed before its record was
+// written: a channel Discord made for it is adopted and closed like any
+// other (archived or deleted), so no unrouted channel stays writable.
+func (m *Manager) abandon(ctx context.Context, in Input) (Result, error) {
+	rec := in.Rec
+	var ch *discordgo.Channel
+	err := m.place(ctx, in, func(p *placement) error {
+		var err error
+		ch, err = p.adoptable(ctx, *rec.Creation, rec.TaskID)
+		return err
+	})
+	if err != nil {
+		return Result{Rec: rec}, fmt.Errorf("looking for an unrecorded channel: %w", err)
+	}
+	made := *rec.Creation
+	rec.Creation, rec.UpdatedAt, rec.LastError = nil, in.Now, ""
+	if ch == nil {
+		rec.Status = store.StatusDeleted // nothing was created
+		return Result{Rec: rec, Changed: true}, nil
+	}
+	rec.ChannelID, rec.Status, rec.RolesKey = ch.ID, store.StatusActive, made.RolesKey
+	rec.SyncedTitle, rec.SyncedTopic = made.Title, made.Topic
+	if rec.OutboundCursor.CreatedAt == "" {
+		// Should the close fail and leave it open, mirror nothing old.
+		rec.OutboundCursor = store.Cursor{CreatedAt: in.Now.UTC().Format(time.RFC3339Nano)}
+	}
+	closed, err := m.close(ctx, Input{Task: in.Task, Rec: rec, Guild: in.Guild, ParentIdentifier: in.ParentIdentifier, Now: in.Now})
+	closed.Changed = true // adopted at least; a failed close is retried
+	return closed, err
 }
 
 // MarkDeleted records that Discord deleted the channel.
@@ -210,8 +244,10 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 	rec.TaskID, rec.WorkspaceID, rec.GuildID = in.Task.ID, in.Task.WorkspaceID, in.Guild.GuildID
 	rec.UpdatedAt = in.Now
 	want := store.Creation{Name: Name(in.Task), Topic: m.topic(in), Title: in.Task.Title, At: in.Now}
-	made := want
-	var ch *discordgo.Channel
+	var (
+		ch   *discordgo.Channel
+		made store.Creation
+	)
 	err := m.place(ctx, in, func(p *placement) error {
 		if prev.Status == store.StatusCreating && prev.Creation != nil {
 			found, err := p.adoptable(ctx, *prev.Creation, in.Task.ID)
@@ -224,6 +260,7 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		if err != nil {
 			return err
 		}
+		want.RolesKey = RolesKey(p.guild)
 		if m.SaveIntent != nil {
 			intent := rec
 			// No channel yet: a former (deleted) channel must not be routed.
@@ -236,14 +273,17 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 			Name: want.Name, Type: discordgo.ChannelTypeGuildText, Topic: want.Topic,
 			ParentID: parent, PermissionOverwrites: provision.TaskOverwrites(m.roles(p.guild)),
 		})
+		made = want
 		return err
 	})
 	if err == nil {
 		rec.ChannelID, rec.Status, rec.LastError, rec.Creation = ch.ID, store.StatusActive, "", nil
-		// An adopted channel carries the name and topic of the original
-		// request; rename converges it to the current title.
+		// An adopted channel carries the name, topic, and overwrites of the
+		// original request: rename converges the name, and a RolesKey that
+		// is not the guild's makes Converge rewrite the overwrites before
+		// anything is posted.
 		rec.SyncedTitle, rec.SyncedTopic, rec.LastRenamedAt = made.Title, made.Topic, time.Time{}
-		rec.RolesKey = RolesKey(in.Guild)
+		rec.RolesKey = made.RolesKey
 		rec.InboundCursor, rec.InboundInflight = ch.ID, ""
 		rec.CardMessageID, rec.CardHash, rec.CardPinned = "", "", false
 		rec.ClosedAt, rec.DeleteAfter = time.Time{}, time.Time{}
@@ -254,8 +294,8 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 			m.Note(ctx, in.Guild, fmt.Sprintf("Recreated the channel of %s (#%s) after it was deleted in Discord.", label(in.Task), ch.Name))
 		}
 		res := Result{Rec: rec, Changed: true}
-		if made.Title != in.Task.Title {
-			res.RetryAfter = time.Second // rename the adopted channel promptly
+		if made.Title != in.Task.Title || made.RolesKey != RolesKey(in.Guild) {
+			res.RetryAfter = time.Second // converge the adopted channel promptly
 		}
 		return res, nil
 	}

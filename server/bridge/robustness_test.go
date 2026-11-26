@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -144,12 +145,16 @@ func TestConcurrentTasksShareOneRolloverCategory(t *testing.T) {
 	assert.Equal(t, 1, n)
 }
 
-// flakyState fails the Nth write of one key.
+// flakyState fails the Nth write of one key, and the next reads of
+// getFails keys.
 type flakyState struct {
 	*store.MemoryHost
 	key   string
 	fail  int32
 	count atomic.Int32
+
+	mu       sync.Mutex
+	getFails map[string]int
 }
 
 func (f *flakyState) SetState(ctx context.Context, scope, scopeID, key string, v map[string]any) error {
@@ -157,6 +162,36 @@ func (f *flakyState) SetState(ctx context.Context, scope, scopeID, key string, v
 		return errors.New("host unavailable")
 	}
 	return f.MemoryHost.SetState(ctx, scope, scopeID, key, v)
+}
+
+func (f *flakyState) GetState(ctx context.Context, scope, scopeID, key string) (map[string]any, bool, error) {
+	f.mu.Lock()
+	k := scope + "/" + scopeID + "/" + key
+	if f.getFails[k] > 0 {
+		f.getFails[k]--
+		f.mu.Unlock()
+		return nil, false, errors.New("host unavailable")
+	}
+	f.mu.Unlock()
+	return f.MemoryHost.GetState(ctx, scope, scopeID, key)
+}
+
+// failReads makes the next n reads of a state key fail.
+func (f *flakyState) failReads(key string, n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getFails == nil {
+		f.getFails = map[string]int{}
+	}
+	f.getFails[key] += n
+}
+
+// withFlakyStore rebuilds the harness bridge over a flakyState.
+func (h *harness) withFlakyStore() *flakyState {
+	flaky := &flakyState{MemoryHost: h.mem}
+	h.st = store.New(flaky)
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	return flaky
 }
 
 func TestLostRecordWriteAdoptsTheCreatedChannelEvenAfterARename(t *testing.T) {
@@ -366,8 +401,154 @@ func TestStatusChannelAnnouncesLifecycleTransitions(t *testing.T) {
 	h.wait()
 	assert.Contains(t, notes()[1], "Disconnected")
 
+	h.reconcile(t) // REST re-provisioning while the gateway is still down
+	h.b.provisionGuild(ctx, config.Binding{WorkspaceID: wsID, GuildID: guildID})
+	assert.Len(t, notes(), 2, "no false all-clear")
+
 	h.b.setGateway(ctx, gateway.State{Name: gateway.StateConnected})
 	h.ready(t)
 	require.Len(t, notes(), 3)
 	assert.Contains(t, notes()[2], "Reconnected")
+}
+
+func TestUnreadableRouteRetriesFromHistoryBeforeLaterMessages(t *testing.T) {
+	h := newHarness(t)
+	flaky := h.withFlakyStore()
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	member := &discordgo.Member{Roles: []string{g.OperatorRoleID}}
+	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
+	h.api.Members[author.ID] = member
+	ctx := context.Background()
+	h.b.ensureCaughtUp(ctx, rec, g)
+
+	at := *h.clock
+	first := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(at.Add(-2 * time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "first", Author: author, Member: member})
+	flaky.failReads("instance//channel:"+rec.ChannelID, 1)
+	h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: first})
+	h.wait()
+	require.Empty(t, h.host.Sent)
+
+	second := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(at.Add(-time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "second", Author: author, Member: member})
+	h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: second})
+	h.wait()
+	require.Len(t, h.host.Sent, 2)
+	assert.Equal(t, "alice (Discord): first", h.host.Sent[0].Text)
+	assert.Equal(t, "alice (Discord): second", h.host.Sent[1].Text)
+}
+
+func TestAdoptedChannelConvergesRolesBeforeAnyPost(t *testing.T) {
+	h := newHarness(t)
+	h.api.StartIDsAt(*h.clock)
+	flaky := &flakyState{MemoryHost: h.mem, key: "task/1/channel", fail: 2} // the write after creation fails
+	h.st = store.New(flaky)
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	g, _ := h.b.guild(wsID)
+	oldRole := g.OperatorRoleID
+	g.OperatorRoleID = h.api.NewID() // authority moved before the retry
+	require.NoError(t, h.b.setGuild(context.Background(), wsID, g))
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", AuthorType: "agent", Type: "message", Content: "secret answer", CreatedAt: "2026-11-25T12:00:01Z"})
+
+	h.reconcile(t) // adopts the channel made with the former role's overwrites
+	rec := h.channel(t, "1")
+	require.Equal(t, store.StatusActive, rec.Status)
+	assert.NotContains(t, h.texts(rec.ChannelID), "secret answer")
+
+	h.reconcile(t)
+	assert.Contains(t, h.texts(rec.ChannelID), "secret answer")
+	for _, ow := range h.api.Channels[rec.ChannelID].PermissionOverwrites {
+		assert.NotEqual(t, oldRole, ow.ID, "the former operator role lost its overwrite")
+	}
+}
+
+func TestFailedReprovisioningStillMovesAuthority(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	old, _ := h.b.guild(wsID)
+	rec := h.channel(t, "1")
+
+	h.b.cfg.OperatorRoleName = "Kandev Ops"
+	h.api.FailNext("ChannelEdit", &discordapi.Error{Status: 503}) // the category overwrite fix fails
+	h.ready(t)
+	g, _ := h.b.guild(wsID)
+	require.NotEqual(t, old.OperatorRoleID, g.OperatorRoleID, "the new role is trusted despite the failure")
+	assert.Equal(t, channels.RolesKey(g), h.channel(t, "1").RolesKey, "the task channel converged")
+	for _, ow := range h.api.Channels[rec.ChannelID].PermissionOverwrites {
+		assert.NotEqual(t, old.OperatorRoleID, ow.ID)
+	}
+}
+
+func TestCloseWaitsForARunningSession(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.CloseTrigger = config.CloseOnTerminal })
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	h.host.Tasks["1"].State = "COMPLETED"
+	h.host.Tasks["1"].UpdatedAt = h.clock.Format(time.RFC3339)
+	h.host.Sessions["1"] = []pluginsdk.Session{{ID: "s1", TaskID: "1", State: "RUNNING"}}
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", SessionID: "s1", AuthorType: "agent", Type: "message", Content: "Final answer, still streaming", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.event(t, "e1", "task.state_changed", map[string]any{"task_id": "1"})
+	assert.Equal(t, store.StatusActive, h.channel(t, "1").Status, "the session's last message may still grow")
+
+	h.host.Sessions["1"][0].State = "COMPLETED"
+	h.event(t, "e2", "task_session.state_changed", map[string]any{"task_id": "1"})
+	assert.Contains(t, h.texts(rec.ChannelID), "Final answer, still streaming")
+	assert.Equal(t, store.StatusArchived, h.channel(t, "1").Status)
+}
+
+func TestTaskClosedDuringAnUnrecordedCreationClosesItsChannel(t *testing.T) {
+	h := newHarness(t)
+	h.api.StartIDsAt(*h.clock)
+	flaky := &flakyState{MemoryHost: h.mem, key: "task/1/channel", fail: 2}
+	h.st = store.New(flaky)
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	require.Equal(t, store.StatusCreating, h.channel(t, "1").Status)
+
+	archived := h.clock.Format(time.RFC3339)
+	h.host.Tasks["1"].ArchivedAt = &archived
+	h.reconcile(t)
+	rec := h.channel(t, "1")
+	assert.Equal(t, store.StatusArchived, rec.Status)
+	require.NotEmpty(t, rec.ChannelID)
+	g, _ := h.b.guild(wsID)
+	assert.Contains(t, g.ArchiveCategoryIDs, h.api.Channels[rec.ChannelID].ParentID)
+	assert.Len(t, h.api.CallsTo("GuildChannelCreate"), 3+1, "nothing new was created")
+}
+
+func TestArchivedChannelPromptsLoseTheirButtonsEventually(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.host.Interactions["p1"] = &pluginsdk.Interaction{ID: "p1", Kind: pluginsdk.InteractionKindPermission, TaskID: "1",
+		Status: pluginsdk.InteractionStatusPending, Title: "Run tests?",
+		Options: []pluginsdk.InteractionOption{{OptionID: "a", Label: "Allow", Kind: "allow_once"}}}
+	h.ready(t)
+	rec := h.channel(t, "1")
+	var prompt *discordgo.Message
+	for _, m := range h.api.SentMessages(rec.ChannelID) {
+		if strings.Contains(m.Content, "Run tests?") {
+			prompt = m
+		}
+	}
+	require.NotNil(t, prompt)
+	require.NotEmpty(t, prompt.Components)
+
+	archived := h.clock.Format(time.RFC3339)
+	h.host.Tasks["1"].ArchivedAt = &archived
+	h.api.FailNext("MessageEdit", &discordapi.Error{Status: 503})
+	h.event(t, "e1", "task.updated", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusArchived, h.channel(t, "1").Status)
+	assert.NotEmpty(t, h.api.Message(rec.ChannelID, prompt.ID).Components, "the edit failed once")
+
+	h.reconcile(t)
+	assert.Empty(t, h.api.Message(rec.ChannelID, prompt.ID).Components, "retried on a later sync")
+	stored, err := h.st.Prompts(context.Background(), "1")
+	require.NoError(t, err)
+	assert.Empty(t, stored.Items)
 }

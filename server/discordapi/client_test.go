@@ -117,6 +117,32 @@ func TestClientMessagesNeverParseMentions(t *testing.T) {
 	assert.True(t, strings.Contains(body["content"].(string), "@everyone"))
 }
 
+func TestCreationsAreNeverResentOnBadGateway(t *testing.T) {
+	var posts atomic.Int32
+	var body map[string]any
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		posts.Add(1)
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	_, err := c.MessageSendOnce(context.Background(), "7", "@here part", "n1")
+	require.Error(t, err)
+	assert.Equal(t, int32(1), posts.Load(), "Discord may have stored the first request")
+	assert.Equal(t, "n1", body["nonce"])
+	assert.Equal(t, true, body["enforce_nonce"])
+	assert.Equal(t, []any{}, body["allowed_mentions"].(map[string]any)["parse"])
+
+	posts.Store(0)
+	_, err = c.MessageSend(context.Background(), "7", &discordgo.MessageSend{Content: "x"})
+	require.Error(t, err)
+	_, err = c.GuildChannelCreate(context.Background(), "1", discordgo.GuildChannelCreateData{Name: "x"})
+	require.Error(t, err)
+	_, err = c.GuildRoleCreate(context.Background(), "1", &discordgo.RoleParams{Name: "x"})
+	require.Error(t, err)
+	assert.Equal(t, int32(3), posts.Load())
+}
+
 func TestFakeChannelMessagesAfterCursor(t *testing.T) {
 	f := NewFake()
 	ch := f.AddChannel(&discordgo.Channel{GuildID: "g"})

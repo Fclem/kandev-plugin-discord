@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -57,37 +58,50 @@ func (b *Bridge) onMessageCreate(_ context.Context, m *discordgo.MessageCreate) 
 	msg := m.Message
 	b.sched.Do("chan:"+msg.ChannelID, func(ctx context.Context) {
 		ix, found, err := b.st.ChannelIndex(ctx, msg.ChannelID)
-		if err != nil || !found || ix.GuildID != msg.GuildID {
+		if err != nil {
+			// Route unknown for now: the message stays in Discord's history
+			// and the channel catches up before any later live message.
+			log.Printf("discord: routing message %s: %v; retrying from history", msg.ID, err)
+			b.retryCatchUp(msg.ChannelID)
+			return
+		}
+		if !found || ix.GuildID != msg.GuildID {
 			return
 		}
 		b.onTaskAndWait(ix.TaskID, func(ctx context.Context) {
-			rec, guild, ok := b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
-			if !ok || !b.ensureCaughtUp(ctx, rec, guild) {
-				return
+			rec, guild, ok, err := b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
+			if err == nil && ok && b.ensureCaughtUp(ctx, rec, guild) {
+				rec, _, ok, err = b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
+				if err == nil && ok {
+					_, err = b.inboundHandler(guild).Handle(ctx, rec, msg)
+				}
 			}
-			rec, _, _ = b.activeRecord(ctx, ix.TaskID, msg.ChannelID, msg.GuildID)
-			if _, err := b.inboundHandler(guild).Handle(ctx, rec, msg); err != nil {
+			if err != nil {
 				// The cursor stayed before this message; later messages must
 				// not move it past, so the channel catches up from it first.
 				log.Printf("discord: delivering message %s to task %s: %v; retrying from history", msg.ID, ix.TaskID, err)
-				b.retryCatchUp(rec)
+				b.retryCatchUp(msg.ChannelID)
 			}
 		})
 	})
 }
 
 // activeRecord returns a task's record when it is the active channel of
-// the bound, provisioned guild given.
-func (b *Bridge) activeRecord(ctx context.Context, taskID, channelID, guildID string) (store.Channel, store.Guild, bool) {
+// the bound, provisioned guild given. err is a store failure: the answer is
+// unknown, not no.
+func (b *Bridge) activeRecord(ctx context.Context, taskID, channelID, guildID string) (store.Channel, store.Guild, bool, error) {
 	rec, found, err := b.st.Channel(ctx, taskID)
-	if err != nil || !found || rec.Status != store.StatusActive || rec.ChannelID != channelID || rec.GuildID != guildID {
-		return rec, store.Guild{}, false
+	if err != nil {
+		return rec, store.Guild{}, false, fmt.Errorf("reading the channel record: %w", err)
+	}
+	if !found || rec.Status != store.StatusActive || rec.ChannelID != channelID || rec.GuildID != guildID {
+		return rec, store.Guild{}, false, nil
 	}
 	guild, binding, ok := b.guildByID(guildID)
 	if !ok || binding.WorkspaceID != rec.WorkspaceID {
-		return rec, store.Guild{}, false
+		return rec, store.Guild{}, false, nil
 	}
-	return rec, guild, true
+	return rec, guild, true, nil
 }
 
 // ensureCaughtUp delivers what a channel received while the bridge was
@@ -102,7 +116,7 @@ func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild st
 	}
 	if _, err := b.inboundHandler(guild).CatchUp(ctx, rec); err != nil {
 		log.Printf("discord: catching up channel of task %s: %v", rec.TaskID, err)
-		b.retryCatchUp(rec)
+		b.retryCatchUp(rec.ChannelID)
 		return false
 	}
 	b.mu.Lock()
@@ -112,12 +126,23 @@ func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild st
 }
 
 // retryCatchUp makes the channel catch up from its saved cursor before any
-// further live message, and schedules that catch-up.
-func (b *Bridge) retryCatchUp(rec store.Channel) {
+// further live message, and schedules that catch-up (the reconcile also
+// runs it).
+func (b *Bridge) retryCatchUp(channelID string) {
 	b.mu.Lock()
-	b.caughtUp[rec.ChannelID] = -1
+	b.caughtUp[channelID] = -1
 	b.mu.Unlock()
-	b.timers.after("catchup:"+rec.ChannelID, catchUpRetry, func() { b.catchUp(rec.TaskID, rec.ChannelID) })
+	b.timers.after("catchup:"+channelID, catchUpRetry, func() {
+		b.sched.Do("chan:"+channelID, func(ctx context.Context) {
+			ix, found, err := b.st.ChannelIndex(ctx, channelID)
+			switch {
+			case err != nil:
+				b.retryCatchUp(channelID)
+			case found:
+				b.catchUp(ix.TaskID, channelID)
+			}
+		})
+	})
 }
 
 // needsCatchUp reports whether a channel has not caught up since the last
@@ -134,11 +159,19 @@ func (b *Bridge) catchUp(taskID, channelID string) {
 	b.sched.Do("chan:"+channelID, func(ctx context.Context) {
 		b.onTaskAndWait(taskID, func(ctx context.Context) {
 			rec, found, err := b.st.Channel(ctx, taskID)
-			if err != nil || !found {
+			if err == nil && !found {
 				return
 			}
-			rec, guild, ok := b.activeRecord(ctx, taskID, channelID, rec.GuildID)
-			if ok {
+			var guild store.Guild
+			ok := false
+			if err == nil {
+				rec, guild, ok, err = b.activeRecord(ctx, taskID, channelID, rec.GuildID)
+			}
+			switch {
+			case err != nil:
+				log.Printf("discord: catching up channel of task %s: %v", taskID, err)
+				b.retryCatchUp(channelID)
+			case ok:
 				b.ensureCaughtUp(ctx, rec, guild)
 			}
 		})

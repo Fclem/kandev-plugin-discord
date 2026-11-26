@@ -116,8 +116,17 @@ func (c *Client) GuildRoles(ctx context.Context, guildID string) (rs []*discordg
 	return rs, err
 }
 
+// noRetry disables discordgo's blind resend on HTTP 502 for creations: the
+// first request may have succeeded, so a resend could duplicate it. The
+// plugin's own recovery (creation intents, nonces) retries instead. 429
+// retries stay, as Discord did not process a rate-limited request.
+var noRetry = discordgo.WithRestRetries(0)
+
 func (c *Client) GuildRoleCreate(ctx context.Context, guildID string, params *discordgo.RoleParams) (r *discordgo.Role, err error) {
-	err = c.do(ctx, func(o discordgo.RequestOption) error { r, err = c.s.GuildRoleCreate(guildID, params, o); return err })
+	err = c.do(ctx, func(o discordgo.RequestOption) error {
+		r, err = c.s.GuildRoleCreate(guildID, params, o, noRetry)
+		return err
+	})
 	return r, err
 }
 
@@ -128,7 +137,7 @@ func (c *Client) GuildChannels(ctx context.Context, guildID string) (cs []*disco
 
 func (c *Client) GuildChannelCreate(ctx context.Context, guildID string, data discordgo.GuildChannelCreateData) (ch *discordgo.Channel, err error) {
 	err = c.do(ctx, func(o discordgo.RequestOption) error {
-		ch, err = c.s.GuildChannelCreateComplex(guildID, data, o)
+		ch, err = c.s.GuildChannelCreateComplex(guildID, data, o, noRetry)
 		return err
 	})
 	return ch, err
@@ -154,8 +163,30 @@ func (c *Client) ChannelMessages(ctx context.Context, channelID string, limit in
 func (c *Client) MessageSend(ctx context.Context, channelID string, data *discordgo.MessageSend) (m *discordgo.Message, err error) {
 	data.AllowedMentions = NoMentions()
 	err = c.do(ctx, func(o discordgo.RequestOption) error {
-		m, err = c.s.ChannelMessageSendComplex(channelID, data, o)
+		m, err = c.s.ChannelMessageSendComplex(channelID, data, o, noRetry)
 		return err
+	})
+	return m, err
+}
+
+// sendOnce is a message create with Discord's enforce_nonce, which
+// discordgo's MessageSend lacks.
+type sendOnce struct {
+	Content         string                            `json:"content"`
+	AllowedMentions *discordgo.MessageAllowedMentions `json:"allowed_mentions"`
+	Nonce           string                            `json:"nonce"`
+	EnforceNonce    bool                              `json:"enforce_nonce"`
+}
+
+func (c *Client) MessageSendOnce(ctx context.Context, channelID, content, nonce string) (m *discordgo.Message, err error) {
+	body := sendOnce{Content: content, AllowedMentions: NoMentions(), Nonce: nonce, EnforceNonce: true}
+	endpoint := discordgo.EndpointChannelMessages(channelID)
+	err = c.do(ctx, func(o discordgo.RequestOption) error {
+		raw, err := c.s.RequestWithBucketID(http.MethodPost, endpoint, body, endpoint, o, noRetry)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, &m)
 	})
 	return m, err
 }
@@ -185,7 +216,7 @@ func (c *Client) InteractionRespond(ctx context.Context, interaction *discordgo.
 	if resp.Data != nil {
 		resp.Data.AllowedMentions = NoMentions()
 	}
-	return c.doInteraction(ctx, func(o discordgo.RequestOption) error { return c.s.InteractionRespond(interaction, resp, o) })
+	return c.doInteraction(ctx, func(o discordgo.RequestOption) error { return c.s.InteractionRespond(interaction, resp, o, noRetry) })
 }
 
 func (c *Client) InteractionEdit(ctx context.Context, interaction *discordgo.Interaction, edit *discordgo.WebhookEdit) error {

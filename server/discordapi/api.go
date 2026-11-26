@@ -33,6 +33,10 @@ type API interface {
 	// the order Discord returns them (newest first).
 	ChannelMessages(ctx context.Context, channelID string, limit int, afterID string) ([]*discordgo.Message, error)
 	MessageSend(ctx context.Context, channelID string, data *discordgo.MessageSend) (*discordgo.Message, error)
+	// MessageSendOnce posts text with an enforced nonce: within Discord's
+	// nonce window, a repeated send with the same nonce returns the first
+	// message instead of posting again. nonce is at most 25 characters.
+	MessageSendOnce(ctx context.Context, channelID, content, nonce string) (*discordgo.Message, error)
 	MessageEdit(ctx context.Context, data *discordgo.MessageEdit) (*discordgo.Message, error)
 	ReactionAdd(ctx context.Context, channelID, messageID, emoji string) error
 	MessagePin(ctx context.Context, channelID, messageID string) error

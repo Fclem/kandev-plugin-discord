@@ -20,10 +20,15 @@ const (
 )
 
 // noticeUp records a successful provisioning and announces it when it ends
-// a first start, an outage, or a provisioning failure.
+// a first start, an outage, or a provisioning failure. Provisioning also
+// runs over REST while the gateway is down: that ends no outage.
 func (b *Bridge) noticeUp(ctx context.Context, binding config.Binding, g store.Guild) {
 	b.mu.Lock()
 	prev := b.notices[g.GuildID]
+	if prev == noticeDown && b.health.GatewayState != gateway.StateConnected {
+		b.mu.Unlock()
+		return
+	}
 	b.notices[g.GuildID] = noticeUp
 	b.mu.Unlock()
 	var text string

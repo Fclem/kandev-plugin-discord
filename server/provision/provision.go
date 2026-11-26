@@ -95,6 +95,10 @@ type Input struct {
 }
 
 // Provision creates or reuses every guild object and stores the record.
+// A change of operator or viewer role is stored as soon as the roles are
+// resolved, so a failure in a later step still moves authority: task
+// channels converge on the new roles (their RolesKey no longer matches)
+// and nothing is posted under the former ones.
 func Provision(ctx context.Context, api discordapi.API, st *store.Store, in Input) (store.Guild, error) {
 	rec, _, err := st.Guild(ctx, in.Binding.WorkspaceID)
 	if err != nil {
@@ -103,17 +107,23 @@ func Provision(ctx context.Context, api discordapi.API, st *store.Store, in Inpu
 	if rec.GuildID != in.Binding.GuildID {
 		rec = store.Guild{GuildID: in.Binding.GuildID}
 	}
+	prev := rec
 	roles, err := api.GuildRoles(ctx, rec.GuildID)
 	if err != nil {
 		return rec, fmt.Errorf("listing roles: %w", err)
 	}
-	if rec.OperatorRoleID, err = ensureRole(ctx, api, rec.GuildID, roles, rec.OperatorRoleID, in.Config.OperatorRoleName); err != nil {
-		return rec, err
+	if rec.OperatorRoleID, err = ensureRole(ctx, api, rec.GuildID, roles, prev.OperatorRoleID, in.Config.OperatorRoleName); err != nil {
+		return prev, err
 	}
 	rec.ViewerRoleID = ""
 	if in.Config.ViewerRoleName != "" {
-		if rec.ViewerRoleID, err = ensureRole(ctx, api, rec.GuildID, roles, rec.ViewerRoleID, in.Config.ViewerRoleName); err != nil {
-			return rec, err
+		if rec.ViewerRoleID, err = ensureRole(ctx, api, rec.GuildID, roles, prev.ViewerRoleID, in.Config.ViewerRoleName); err != nil {
+			return prev, err
+		}
+	}
+	if rec.OperatorRoleID != prev.OperatorRoleID || rec.ViewerRoleID != prev.ViewerRoleID {
+		if err := st.PutGuild(ctx, in.Binding.WorkspaceID, rec); err != nil {
+			return prev, fmt.Errorf("saving roles: %w", err)
 		}
 	}
 

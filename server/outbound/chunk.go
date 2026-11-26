@@ -76,11 +76,14 @@ func (c *chunker) add(line string) {
 	if c.cur.Len()+need > c.limit && c.cur.Len() > c.header {
 		c.flush()
 	}
-	for c.cur.Len()+len(line)+c.reserve(c.fence) > c.limit {
+	// Split while the line does not fit with the fence state it leaves
+	// behind. A flushed piece is still inside the current block, and the
+	// remainder may open one, so each piece leaves room for either closer.
+	for c.cur.Len()+len(line)+c.reserve(after) > c.limit {
 		if len(c.out) > MaxChunks {
 			return
 		}
-		room := c.limit - c.cur.Len() - c.reserve(c.fence)
+		room := c.limit - c.cur.Len() - max(c.reserve(c.fence), c.reserve(after))
 		cut := runeBoundary(line, max(room, 1))
 		c.cur.WriteString(line[:cut])
 		line = line[cut:]
