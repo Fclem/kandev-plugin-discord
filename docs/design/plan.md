@@ -337,7 +337,9 @@ Wave 7:
   session and IDENTIFYs: discordgo keeps a session Discord may have
   invalidated (close 4007/4009) and offers no reset, and the READY
   reconcile already recovers missed events. Each reconnect costs one
-  identify from the budget.
+  identify from the budget. A handshake that discordgo wedges (an op 7
+  RECONNECT before READY deadlocks its Open) is abandoned after the
+  handshake timeout, leaving one blocked goroutine per occurrence.
 - **Duplicate posts.** Message parts, status lines, cards, and prompts carry an enforced
   nonce, so a retry within Discord's nonce window (a few minutes) never
   duplicates them. A crash between Discord accepting a post and the record
