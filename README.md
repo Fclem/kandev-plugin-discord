@@ -221,6 +221,29 @@ make check-format vet test sdk-check build
 `make sdk-check` checks the installed Go and frontend SDKs against
 `min_kandev_version`; build and package targets run it first.
 
+### Testing
+
+`make test` runs the Go unit tests, the UI tests (`node --test`), and the
+packaging script tests. `make coverage` runs the Go tests with `-race` and
+cross-package coverage, then the UI tests with Node's coverage (Node 22.5+),
+and writes to `COVERAGE_DIR` (default `.build/coverage`): `go.out`, an HTML
+report `go.html`, `go-func.txt`, `ui.lcov`, and a per-package
+`summary.md`. It fails when total Go statement coverage drops below
+`COVERAGE_MIN`:
+
+```sh
+make coverage                          # into .build/coverage
+make coverage COVERAGE_DIR=/tmp/cov    # elsewhere
+```
+
+Tests use in-memory fakes for Discord (`discordapi.Fake`, or an
+`httptest` server for the REST client) and Kandev (`kandev.Fake`,
+`store.MemoryHost`); none reaches the network. The `Test` workflow runs
+`make coverage` and the packaging script tests on every pull request and
+push to `main`, posts the coverage table to the job summary, and uploads
+the reports as the `coverage` artifact. The `CI` workflow checks module
+tidiness, formatting, vet, the SDK pins, and `npm audit`.
+
 Packaging needs a Kandev source checkout for the backend-owned
 `plugin-pack` tool, pinned by `.kandev-tooling-ref`:
 

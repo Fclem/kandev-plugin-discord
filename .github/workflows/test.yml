@@ -1,0 +1,71 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests and coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          path: plugin
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: plugin/go.mod
+          cache-dependency-path: plugin/go.sum
+
+      - name: Set up Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+
+      - name: Install test dependencies
+        working-directory: plugin
+        run: npm ci --ignore-scripts
+
+      - name: Unit tests with coverage
+        working-directory: plugin
+        run: make coverage
+
+      - name: Packaging script tests
+        working-directory: plugin
+        run: make test-package-verifier test-release-version
+
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        working-directory: plugin
+        run: |
+          if [ -f .build/coverage/summary.md ]; then
+            {
+              echo "## Test coverage"
+              echo
+              cat .build/coverage/summary.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No coverage summary was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: plugin/.build/coverage
+          if-no-files-found: warn

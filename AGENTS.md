@@ -32,7 +32,14 @@ From the plugin root, with Go 1.26 and Node 22+:
 ```sh
 npm ci --ignore-scripts
 make check-format vet test sdk-check build
+make coverage   # -race, cross-package Go coverage + UI lcov; fails below COVERAGE_MIN
 ```
+
+`make coverage` writes to `COVERAGE_DIR` (default `.build/coverage`, gitignored).
+Put new Go tests in packages' `_test.go` files using the existing fakes
+(`discordapi.Fake`, `kandev.Fake`, `store.MemoryHost`, the bridge `newHarness`);
+tests never reach the network. Raise `COVERAGE_MIN` only with the coverage it
+guards.
 
 Packaging needs a Kandev checkout at `.kandev-tooling-ref` in
 `.build/kandev-tooling` (see the README), then run

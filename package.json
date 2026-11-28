@@ -6,7 +6,7 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
-    "test:ui": "node --test tests/settings-card.test.js"
+    "test:ui": "node --test tests/settings-card.test.js tests/settings-card-render.test.js"
   },
   "devDependencies": {
     "@kdlbs/plugin-sdk": "0.5.0"

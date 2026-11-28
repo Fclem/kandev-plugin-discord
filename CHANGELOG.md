@@ -36,6 +36,16 @@
 - `connection.status` admin action and the bridge state in the settings card.
 - Design docs mirrored from kdlbs/kandev and re-planned for the merged Host
   contract (kdlbs/kandev#5438).
+- Unit tests for the Discord REST client (against an `httptest` server),
+  the Kandev SDK facade, the store, channels, prompts, commands, authz, the
+  bridge, and the plugin actions, plus rendered settings card tests.
+- `make coverage`: race-checked Go tests with cross-package coverage, an HTML
+  report, a per-package summary, and UI coverage (lcov); it fails below
+  `COVERAGE_MIN` (91%) total Go statement coverage.
+- `Test` workflow: runs `make coverage` and the packaging script tests on
+  pull requests and pushes to `main`, writes the coverage table to the job
+  summary, and uploads the reports as an artifact. The `CI` workflow no
+  longer runs the tests.
 
 ### Changed
 
@@ -179,3 +189,10 @@
   card says so instead of showing the previous process's state.
 - A non-operator's message found by catch-up after the delivery window
   gets ⛔, not an invitation to send it again.
+
+### Fixed (adversarial review round 13)
+
+- Changing `archive_retention_days` applies to channels archived before the
+  change: `0` keeps them, and a lower value deletes old archives sooner.
+- A channel the plugin deleted by policy is recreated without a note
+  claiming it was deleted in Discord.

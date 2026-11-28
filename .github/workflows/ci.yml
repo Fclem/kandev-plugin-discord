@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   verify:
-    name: Tidy, format, vet, and test
+    name: Tidy, format, vet, and audit
     runs-on: ubuntu-latest
     steps:
       - name: Check out plugin
@@ -56,8 +56,7 @@ jobs:
         working-directory: plugin
         run: make vet
 
-      - name: Test
+      # Tests and coverage run in test.yml.
+      - name: Audit dependencies
         working-directory: plugin
-        run: |
-          make test
-          make audit
+        run: make audit

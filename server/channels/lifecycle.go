@@ -116,10 +116,18 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		if want {
 			return m.reopen(ctx, in)
 		}
+		// The deadline follows the current retention setting, so changing
+		// it (0 keeps) applies to channels archived before the change.
+		retimed := false
+		if d := m.deleteAfter(rec.ClosedAt); !rec.ClosedAt.IsZero() && !d.Equal(rec.DeleteAfter) {
+			rec.DeleteAfter, retimed = d, true
+			in.Rec = rec
+		}
 		if !rec.DeleteAfter.IsZero() && !in.Now.Before(rec.DeleteAfter) {
 			return m.remove(ctx, in, "retention period ended")
 		}
 		res, err := m.Converge(ctx, in, true)
+		res.Changed = res.Changed || retimed
 		if err != nil || res.Rec.Status != store.StatusArchived {
 			return res, err
 		}
@@ -129,6 +137,15 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		return res, nil
 	}
 	return Result{Rec: rec}, nil
+}
+
+// deleteAfter is when a channel archived at closedAt is deleted under the
+// current retention setting; zero keeps it.
+func (m *Manager) deleteAfter(closedAt time.Time) time.Time {
+	if days := m.Config.ArchiveRetentionDays; days > 0 {
+		return closedAt.Add(time.Duration(days) * 24 * time.Hour)
+	}
+	return time.Time{}
 }
 
 // abandon settles a creation whose task closed (or vanished) before its
@@ -162,11 +179,15 @@ func (m *Manager) abandon(ctx context.Context, in Input) (Result, error) {
 	return Result{Rec: rec, Changed: true, RetryAfter: time.Second}, nil
 }
 
+// deletedInDiscord marks a record whose channel Discord deleted, as
+// opposed to one the plugin deleted (closed_channel_action, retention).
+const deletedInDiscord = "channel was deleted in Discord"
+
 // MarkDeleted records that Discord deleted the channel. Its access state
 // goes with it: a recreated channel starts fresh.
 func MarkDeleted(rec store.Channel, now time.Time) store.Channel {
 	rec.Status = store.StatusDeleted
-	rec.LastError = "channel was deleted in Discord"
+	rec.LastError = deletedInDiscord
 	rec.UpdatedAt, rec.AccessLostAt = now, time.Time{}
 	return rec
 }
@@ -294,7 +315,7 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		if prev.OutboundCursor.CreatedAt == "" {
 			rec.OutboundCursor = store.Cursor{CreatedAt: initialCursor(in.Task, in.Now)}
 		}
-		if prev.Status == store.StatusDeleted && prev.ChannelID != "" && m.Note != nil {
+		if prev.Status == store.StatusDeleted && prev.LastError == deletedInDiscord && m.Note != nil {
 			m.Note(ctx, in.Guild, fmt.Sprintf("Recreated the channel of %s (#%s) after it was deleted in Discord.", label(in.Task), ch.Name))
 		}
 		res := Result{Rec: rec, Changed: true}
@@ -428,10 +449,7 @@ func (m *Manager) move(ctx context.Context, in Input, archive bool) (Result, err
 		rec.Opens++ // prompts closed on archive are posted again under new nonces
 		return Result{Rec: rec, Changed: true}, nil
 	}
-	rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusArchived, in.Now, time.Time{}
-	if days := m.Config.ArchiveRetentionDays; days > 0 {
-		rec.DeleteAfter = in.Now.Add(time.Duration(days) * 24 * time.Hour)
-	}
+	rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusArchived, in.Now, m.deleteAfter(in.Now)
 	return Result{Rec: rec, Changed: true}, nil
 }
 

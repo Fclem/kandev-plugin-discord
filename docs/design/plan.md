@@ -328,6 +328,11 @@ Wave 7:
   6 s apart) instead of re-identifying in place; unreadable settings are
   retried and reported on the card; a stale message from a non-operator
   gets ⛔ during catch-up.
+- Adversarial review round 12: no findings.
+- Adversarial review round 13 (2 findings) fixed: the retention deadline
+  follows the current `archive_retention_days` for channels already
+  archived; the "deleted in Discord" note fires only for channels Discord
+  deleted, not for policy deletes.
 
 ## Risks
 

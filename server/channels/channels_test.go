@@ -232,3 +232,51 @@ func TestManuallyDeletedChannelIsRecreatedWithNote(t *testing.T) {
 	require.Len(t, f.notes, 1)
 	assert.Contains(t, f.notes[0], "Recreated")
 }
+
+func archivedTask() *pluginsdk.Task {
+	t := task()
+	at := "2026-11-25T12:00:00Z"
+	t.ArchivedAt = &at
+	return t
+}
+
+// Saving the settings restarts the plugin with the new retention, which
+// applies to channels archived before: 0 keeps them, a lower value frees
+// room sooner (the capacity note's advice).
+func TestRetentionChangesApplyToArchivedChannels(t *testing.T) {
+	f := newFixture(t) // retention 30
+	rec := f.sync(t, task(), store.Channel{}).Rec
+	rec = f.sync(t, archivedTask(), rec).Rec
+	require.Equal(t, store.StatusArchived, rec.Status)
+
+	f.m.Config.ArchiveRetentionDays = 0
+	f.now = f.now.Add(31 * 24 * time.Hour)
+	res := f.sync(t, archivedTask(), rec)
+	assert.Equal(t, store.StatusArchived, res.Rec.Status, "retention 0 keeps the archived channel")
+	assert.True(t, res.Changed, "the cleared deadline is saved")
+	assert.NotNil(t, f.api.Channels[rec.ChannelID])
+
+	f.m.Config.ArchiveRetentionDays = 1
+	rec = f.sync(t, archivedTask(), res.Rec).Rec
+	assert.Equal(t, store.StatusDeleted, rec.Status, "a 1-day retention deletes a 31-day-old archive")
+	assert.Nil(t, f.api.Channels[rec.ChannelID])
+}
+
+// A channel the plugin deleted by policy is recreated without a note that
+// claims someone deleted it in Discord.
+func TestPolicyDeleteThenReopenIsNotReportedAsDeletedInDiscord(t *testing.T) {
+	f := newFixture(t, func(c *config.Config) {
+		c.ClosedChannelAction = config.ClosedDelete
+		c.CloseTrigger = config.CloseOnTerminal
+	})
+	rec := f.sync(t, task(), store.Channel{}).Rec
+	done := task()
+	done.State = "COMPLETED"
+	rec = f.sync(t, done, rec).Rec
+	require.Equal(t, store.StatusDeleted, rec.Status)
+	rec = f.sync(t, task(), rec).Rec
+	require.Equal(t, store.StatusActive, rec.Status)
+	for _, n := range f.notes {
+		assert.NotContains(t, n, "deleted in Discord")
+	}
+}
