@@ -425,6 +425,7 @@ func (m *Manager) move(ctx context.Context, in Input, archive bool) (Result, err
 	rec.RolesKey, rec.UpdatedAt, rec.CloseRequestedAt, rec.AccessLostAt = RolesKey(in.Guild), in.Now, time.Time{}, time.Time{}
 	if !archive {
 		rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusActive, time.Time{}, time.Time{}
+		rec.Opens++ // prompts closed on archive are posted again under new nonces
 		return Result{Rec: rec, Changed: true}, nil
 	}
 	rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusArchived, in.Now, time.Time{}

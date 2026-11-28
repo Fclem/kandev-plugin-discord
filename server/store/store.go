@@ -108,7 +108,10 @@ type Channel struct {
 	CardPosts int `json:"card_posts,omitempty"`
 	// StatusPosts counts status lines posted to the channel; it varies the
 	// status line nonce between identical lines.
-	StatusPosts     int               `json:"status_posts,omitempty"`
+	StatusPosts int `json:"status_posts,omitempty"`
+	// Opens counts reopenings of the channel; it varies prompt nonces, so a
+	// prompt closed on archive is posted again after a reopen.
+	Opens           int               `json:"opens,omitempty"`
 	CardEditedAt    time.Time         `json:"card_edited_at,omitzero"`
 	OutboundCursor  Cursor            `json:"outbound_cursor"`
 	InboundCursor   string            `json:"inbound_cursor,omitempty"`

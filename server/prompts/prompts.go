@@ -122,7 +122,7 @@ func (p *Poster) syncInteractions(ctx context.Context, task *pluginsdk.Task, rec
 		}
 		// The nonce makes a retry after a lost reply return the first post
 		// instead of leaving an unrecorded duplicate with live buttons.
-		msg, err := p.API.MessageSendOnce(ctx, rec.ChannelID, p.render(task, it), discordapi.Nonce(rec.ChannelID, "perm", it.ID))
+		msg, err := p.API.MessageSendOnce(ctx, rec.ChannelID, p.render(task, it), discordapi.Nonce(rec.ChannelID, "perm", strconv.Itoa(rec.Opens), it.ID))
 		if err != nil {
 			return fmt.Errorf("posting prompt: %w", err)
 		}
@@ -349,7 +349,7 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 		// Same transition at a new approval state (a later visit, or a
 		// session update): give the prompt a fresh button, silently, so the
 		// old one can no longer approve it.
-		nonce := stepNonce(rec.ChannelID, *awaiting)[:8]
+		nonce := stepNonce(rec, *awaiting)[:8]
 		buttons := stepButtons(*awaiting, nonce)
 		if _, err := p.API.MessageEdit(ctx, &discordgo.MessageEdit{Channel: rec.ChannelID, ID: current.MessageID, Components: &buttons}); err != nil {
 			if !discordapi.IsGone(err) {
@@ -378,7 +378,7 @@ func (p *Poster) syncStep(ctx context.Context, task *pluginsdk.Task, rec store.C
 		text += fmt.Sprintf(" → **%s**", awaiting.ToStepName)
 	}
 	text += ". Approve to move on, or post a message to request changes."
-	nonce := stepNonce(rec.ChannelID, *awaiting)
+	nonce := stepNonce(rec, *awaiting)
 	msg, err := p.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Content: text, Components: stepButtons(*awaiting, nonce[:8])}, nonce)
 	if err != nil {
 		return fmt.Errorf("posting step approval: %w", err)
@@ -400,8 +400,8 @@ func stepButtons(a pluginsdk.StepApproval, nonce string) []discordgo.MessageComp
 // prefix is the button's prompt nonce and the whole the message nonce, so a
 // post retried after a lost reply returns the same prompt with the same
 // button.
-func stepNonce(channelID string, a pluginsdk.StepApproval) string {
-	return discordapi.Nonce(channelID, "step", a.SessionID, a.FromStepID, a.ToStepID, a.ResourceVersion)
+func stepNonce(rec store.Channel, a pluginsdk.StepApproval) string {
+	return discordapi.Nonce(rec.ChannelID, "step", strconv.Itoa(rec.Opens), a.SessionID, a.FromStepID, a.ToStepID, a.ResourceVersion)
 }
 
 func truncate(s string, n int) string {

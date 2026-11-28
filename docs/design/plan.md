@@ -319,6 +319,10 @@ Wave 7:
   access returns in the same process; a 403 mid-catch-up keeps the cursor
   the catch-up saved; `AccessLostAt` is cleared with the channel (deleted,
   recreated, archived, reopened).
+- Adversarial review round 10 (2 findings) fixed: a channel recovered
+  while a session runs is marked recovered; prompt and step nonces include
+  the channel's reopen count, so prompts closed on archive are posted
+  again with live buttons after a quick reopen.
 
 ## Risks
 

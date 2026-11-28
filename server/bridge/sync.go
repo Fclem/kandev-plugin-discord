@@ -185,7 +185,7 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	switch {
 	case discordapi.IsForbidden(err):
 		b.lostAccess(ctx, cur, cur.ChannelID, g, err)
-	case err == nil && !cur.AccessLostAt.IsZero() && !b.needsCatchUp(cur.ChannelID):
+	case (err == nil || errors.Is(err, errSessionRunning)) && !cur.AccessLostAt.IsZero() && !b.needsCatchUp(cur.ChannelID):
 		// Mirroring and catch-up work again: the outage is over.
 		cur.AccessLostAt = time.Time{}
 		if err := b.st.PutChannel(ctx, cur, cur.ChannelID); err != nil {

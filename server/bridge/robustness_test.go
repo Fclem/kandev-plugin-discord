@@ -992,3 +992,76 @@ func TestRecreatedChannelIsNotAnnouncedAsRecovered(t *testing.T) {
 		assert.NotContains(t, n, "access to <#"+got.ChannelID+"> again", "a new channel never lost access")
 	}
 }
+
+func countLost(notes []string) int {
+	n := 0
+	for _, s := range notes {
+		if strings.Contains(s, "lost access") {
+			n++
+		}
+	}
+	return n
+}
+
+// A channel recovered while a session runs is marked recovered, so a
+// second outage is announced again.
+func TestSecondOutageWhileASessionRunsIsAnnounced(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.LiveUpdateInterval = 0 })
+	h.addTask("1", "Fix login")
+	h.host.Sessions["1"] = []pluginsdk.Session{{ID: "s1", TaskID: "1", State: "RUNNING", AgentDisplayName: "Claude", StartedAt: "2026-11-25T11:59:30Z"}}
+	h.ready(t)
+	g, _ := h.b.guild(wsID)
+
+	h.host.AddMessage(pluginsdk.Message{ID: "u1", TaskID: "1", SessionID: "s1", AuthorType: "user", Type: "message", Content: "first", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.api.FailNext("MessageSend", &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"})
+	h.event(t, "e1", "message.queue.status_changed", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+	require.Equal(t, 1, countLost(h.texts(g.StatusChannelID)))
+
+	// Access restored; two passes (reactivate, catch up, sync again).
+	*h.clock = h.clock.Add(5 * time.Minute)
+	h.b.reconcileAll()
+	h.wait()
+	h.b.reconcileAll()
+	h.wait()
+	rec := h.channel(t, "1")
+	require.Equal(t, store.StatusActive, rec.Status)
+	assert.Contains(t, h.texts(rec.ChannelID), "**Kandev:** first", "mirroring resumed")
+
+	// Access lost again, later, while the session still runs.
+	*h.clock = h.clock.Add(time.Hour)
+	h.host.AddMessage(pluginsdk.Message{ID: "u2", TaskID: "1", SessionID: "s1", AuthorType: "user", Type: "message", Content: "second", CreatedAt: "2026-11-25T13:05:01Z"})
+	h.api.FailNext("MessageSend", &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"})
+	h.event(t, "e2", "message.queue.status_changed", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+	assert.Equal(t, 2, countLost(h.texts(g.StatusChannelID)), "the second outage is announced in #kandev-status")
+}
+
+// Prompts closed on archive are posted again with live buttons when the
+// channel reopens within Discord's nonce window.
+func TestReopenedChannelRepostsLivePrompts(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.host.Interactions["p1"] = &pluginsdk.Interaction{ID: "p1", Kind: pluginsdk.InteractionKindPermission, TaskID: "1",
+		Status: pluginsdk.InteractionStatusPending, Title: "Run tests?",
+		Options: []pluginsdk.InteractionOption{{OptionID: "a", Label: "Allow", Kind: "allow_once"}}}
+	h.ready(t)
+	rec := h.channel(t, "1")
+
+	archived := h.clock.Format(time.RFC3339)
+	h.host.Tasks["1"].ArchivedAt = &archived
+	h.event(t, "e1", "task.updated", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusArchived, h.channel(t, "1").Status)
+
+	*h.clock = h.clock.Add(time.Minute)
+	h.host.Tasks["1"].ArchivedAt = nil
+	h.event(t, "e2", "task.updated", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusActive, h.channel(t, "1").Status)
+
+	stored, err := h.st.Prompts(t.Context(), "1")
+	require.NoError(t, err)
+	require.Len(t, stored.Items, 1)
+	msg := h.api.Message(rec.ChannelID, stored.Items[0].MessageID)
+	require.NotNil(t, msg)
+	assert.NotEmpty(t, msg.Components, "the pending request's prompt in the reopened channel has live buttons")
+}

@@ -162,3 +162,10 @@
   twice.
 - A recreated channel is not announced as recovered, and its own outages
   are announced.
+
+### Fixed (adversarial review round 10)
+
+- Access recovered while an agent is working is announced, so a later
+  outage is announced too.
+- Pending prompts get live buttons again when a channel is reopened soon
+  after being archived.
