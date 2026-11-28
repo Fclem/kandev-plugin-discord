@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -244,6 +245,10 @@ func (s *Supervisor) Run(ctx context.Context) State {
 			if s.refused.Swap(false) || s.Halted() || ctx.Err() != nil {
 				continue // the loop reports the refusal, the halt, or the stop
 			}
+			if tokenRejected(err) {
+				_ = conn.Close()
+				return s.stop(StateHalted, 0, haltReason) // gateway discovery (GET /gateway) got 401
+			}
 			code := closeCode(err)
 			if c := s.fatalClose(); c != 0 {
 				code = c
@@ -281,7 +286,10 @@ func (s *Supervisor) Run(ctx context.Context) State {
 }
 
 // open runs conn.Open, bounded by the handshake timeout and interruptible
-// by ctx or a halt, when conn can abort its transport.
+// by ctx or a halt, when conn can abort its transport. After an abort it
+// does not wait for Open: discordgo can block in Open on its own session
+// lock (an op 7 RECONNECT before READY), so the attempt is abandoned and
+// finished in the background, closing a connection that completed late.
 func (s *Supervisor) open(ctx context.Context, conn Conn) error {
 	ab, ok := conn.(Aborter)
 	if !ok {
@@ -303,10 +311,19 @@ func (s *Supervisor) open(ctx context.Context, conn Conn) error {
 		cause = errHandshakeTimeout
 	}
 	ab.Abort()
-	if err := <-done; err == nil {
-		_ = conn.Close() // completed as it was aborted
-	}
+	go func() {
+		if err := <-done; err == nil {
+			_ = conn.Close()
+		}
+	}()
 	return cause
+}
+
+// tokenRejected reports a REST 401, which discordgo's gateway discovery
+// returns when the bot token was reset.
+func tokenRejected(err error) bool {
+	var rest *discordgo.RESTError
+	return errors.As(err, &rest) && rest.Response != nil && rest.Response.StatusCode == http.StatusUnauthorized
 }
 
 func (s *Supervisor) stop(name string, code int, reason string) State {

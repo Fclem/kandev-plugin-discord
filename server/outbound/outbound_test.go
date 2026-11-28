@@ -367,3 +367,36 @@ func TestCardIsPinnedOnceAndEditsAreDebounced(t *testing.T) {
 	card := f.api.Message(f.rec.ChannelID, f.rec.CardMessageID)
 	assert.Equal(t, "review", card.Embeds[0].Fields[0].Value)
 }
+
+func TestCardReturnedByARetriedPostIsEditedToCurrentContents(t *testing.T) {
+	f := newMirror(t)
+	f.api.LoseNextReply("MessageSend")
+	_, err := f.try(f.rec)
+	require.Error(t, err)
+	f.task.Title = "Renamed" // the task changed before the retry
+	now := time.Now()
+	f.sync(t, nil, now) // Discord returns the first card (same nonce)
+	f.sync(t, nil, now.Add(time.Minute))
+	sent := f.api.SentMessages(f.rec.ChannelID)
+	require.Len(t, sent, 1, "one card")
+	assert.Contains(t, sent[0].Embeds[0].Title, "Renamed")
+}
+
+func TestStatusLineRetriedAfterALostReplyIsPostedOnce(t *testing.T) {
+	f := newMirror(t)
+	sessions := []pluginsdk.Session{{ID: "s1", State: "RUNNING", AgentDisplayName: "Claude"}}
+	f.host.Sessions["t1"] = sessions
+	f.api.LoseNextReply("MessageSend")
+	res, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Sessions: sessions, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	f.rec = res.Rec
+	f.sync(t, sessions, time.Now())
+	assert.Equal(t, []string{"▶️ **Claude** is working."}, f.texts())
+
+	// A later identical line (a new turn) is still posted.
+	f.host.Sessions["t1"][0].State = "WAITING_FOR_INPUT"
+	f.sync(t, f.host.Sessions["t1"], time.Now())
+	f.host.Sessions["t1"][0].State = "RUNNING"
+	f.sync(t, f.host.Sessions["t1"], time.Now())
+	assert.Len(t, f.texts(), 3)
+}

@@ -68,9 +68,14 @@ func (m *Mirror) Sync(ctx context.Context, in Input) (Result, error) {
 	}
 	lines, next := StatusLines(rec.SessionStates, in.Sessions)
 	for _, line := range lines {
-		if _, err := m.API.MessageSend(ctx, rec.ChannelID, &discordgo.MessageSend{Content: line}); err != nil {
+		// The nonce (posting order and text) makes a retry after a lost
+		// reply return the posted line; StatusPosts, saved with the new
+		// states, keeps a later identical line distinct.
+		nonce := discordapi.Nonce(rec.ChannelID, "status", strconv.Itoa(rec.StatusPosts), line)
+		if _, err := m.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Content: line}, nonce); err != nil {
 			return res, fmt.Errorf("posting status line: %w", err)
 		}
+		rec.StatusPosts++
 	}
 	if !maps.Equal(next, rec.SessionStates) {
 		rec.SessionStates = next
@@ -264,6 +269,11 @@ func (m *Mirror) card(ctx context.Context, rec *store.Channel, in CardInput, now
 			return 0, fmt.Errorf("posting task card: %w", err)
 		}
 		rec.CardMessageID, rec.CardHash, rec.CardEditedAt, rec.CardPinned = msg.ID, hash, now, false
+		if !sameEmbed(msg, embed) {
+			// A retried post returned the card a lost reply had created,
+			// with older contents: leave the hash unset so it is edited.
+			rec.CardHash = ""
+		}
 		rec.CardPosts++
 	}
 	if !rec.CardPinned {
@@ -274,6 +284,24 @@ func (m *Mirror) card(ctx context.Context, rec *store.Channel, in CardInput, now
 		rec.CardPinned = true // pinned, or the channel's pin limit makes retrying pointless
 	}
 	return retry, nil
+}
+
+// sameEmbed reports whether a posted message carries embed's contents.
+func sameEmbed(msg *discordgo.Message, embed *discordgo.MessageEmbed) bool {
+	if len(msg.Embeds) != 1 {
+		return false
+	}
+	got := msg.Embeds[0]
+	if got.Title != embed.Title || got.Description != embed.Description || got.URL != embed.URL ||
+		got.Color != embed.Color || len(got.Fields) != len(embed.Fields) {
+		return false
+	}
+	for i, f := range embed.Fields {
+		if g := got.Fields[i]; g == nil || f == nil || g.Name != f.Name || g.Value != f.Value || g.Inline != f.Inline {
+			return false
+		}
+	}
+	return true
 }
 
 func parseTime(s string) time.Time {

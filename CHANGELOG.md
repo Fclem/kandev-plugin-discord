@@ -121,3 +121,13 @@
 - Cards and prompts are not duplicated by a retry after a lost reply.
 - `#kandev-status` keeps gateway outages and provisioning failures apart.
 - Code blocks are never split across their delimiter line.
+
+### Fixed (adversarial review round 5)
+
+- A deleted task's channel is closed even when its index write failed.
+- A gateway handshake that discordgo wedges (op 7 before READY), or that
+  is aborted during gateway discovery, no longer blocks reconnecting.
+- A reset bot token detected during gateway discovery stops the gateway
+  with the token-rejected state instead of retrying forever.
+- A card or status line retried after a lost reply is neither stale nor
+  duplicated.

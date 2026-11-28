@@ -302,6 +302,12 @@ Wave 7:
   is bounded from a persisted first attempt; `markStep` matches the
   ResourceVersion; cards and prompts carry nonces; outage and provisioning
   notices are tracked apart; over-long fence lines are never split.
+- Adversarial review round 5 (5 findings) fixed: the creation inventory
+  keeps a vanished task until its channel is deleted or closed and
+  indexed; the handshake is abandoned (not awaited) after an abort and an
+  aborted session never dials (discordgo deadlocks in Open on an op 7
+  before READY); a 401 from gateway discovery halts; a card returned by a
+  retried post with older contents is edited; status lines carry nonces.
 
 ## Risks
 
@@ -332,7 +338,7 @@ Wave 7:
   invalidated (close 4007/4009) and offers no reset, and the READY
   reconcile already recovers missed events. Each reconnect costs one
   identify from the budget.
-- **Duplicate posts.** Message parts, cards, and prompts carry an enforced
+- **Duplicate posts.** Message parts, status lines, cards, and prompts carry an enforced
   nonce, so a retry within Discord's nonce window (a few minutes) never
   duplicates them. A crash between Discord accepting a post and the record
   write, followed by an outage longer than that window, can post that one

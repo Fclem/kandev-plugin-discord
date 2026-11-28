@@ -649,3 +649,51 @@ func TestCloseHoldIsBoundedFromTheFirstAttempt(t *testing.T) {
 	h.event(t, "e4", "task.updated", map[string]any{"task_id": "1"})
 	assert.Equal(t, store.StatusArchived, h.channel(t, "1").Status, "40 minutes after the first attempt")
 }
+
+// lostIndexState loses the second write of task 1's record and the first
+// write of any channel index entry.
+type lostIndexState struct {
+	*store.MemoryHost
+	taskWrites, indexWrites int
+}
+
+func (f *lostIndexState) SetState(ctx context.Context, scope, scopeID, key string, v map[string]any) error {
+	if scope == "task" && scopeID == "1" && key == "channel" {
+		if f.taskWrites++; f.taskWrites == 2 {
+			return errors.New("lost record write")
+		}
+	}
+	if scope == "instance" && strings.HasPrefix(key, "channel:") {
+		if f.indexWrites++; f.indexWrites == 1 {
+			return errors.New("lost index write")
+		}
+	}
+	return f.MemoryHost.SetState(ctx, scope, scopeID, key, v)
+}
+
+func TestDeletedTaskChannelIsClosedEvenIfItsAdoptionLostTheIndex(t *testing.T) {
+	h := newHarness(t, func(c *config.Config) { c.ClosedChannelAction = config.ClosedDelete })
+	h.api.StartIDsAt(*h.clock)
+	h.st = store.New(&lostIndexState{MemoryHost: h.mem})
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.addTask("1", "One")
+	h.ready(t)
+	require.Equal(t, store.StatusCreating, h.channel(t, "1").Status)
+	var made string
+	for id, ch := range h.api.Channels {
+		if ch.Name == "kan-1-one" {
+			made = id
+		}
+	}
+	require.NotEmpty(t, made)
+
+	delete(h.host.Tasks, "1")
+	h.reconcile(t) // adopts it; the record is saved, its index entry is lost
+	require.Equal(t, store.StatusActive, h.channel(t, "1").Status)
+	h.reconcile(t)
+	h.reconcile(t)
+	assert.NotContains(t, h.api.Channels, made, "the channel is still found and closed")
+	pending, err := h.st.CreatingTasks(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending)
+}

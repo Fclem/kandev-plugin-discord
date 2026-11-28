@@ -307,3 +307,71 @@ type readOnly struct{ *store.MemoryHost }
 func (readOnly) SetState(context.Context, string, string, string, map[string]any) error {
 	return errors.New("state is read-only")
 }
+
+func TestReconnectBeforeReadyCannotWedgeTheSupervisor(t *testing.T) {
+	var g *fakeGateway
+	g = newFakeGateway(t, func(c *websocket.Conn, _ int32) {
+		if !g.readIdentify(c) {
+			return
+		}
+		_ = c.WriteJSON(map[string]any{"op": 7, "d": nil}) // discordgo deadlocks in Open on this
+		time.Sleep(time.Second)
+	})
+	sup := &Supervisor{Budget: budget(), Handshake: 100 * time.Millisecond}
+	sup.init()
+	done := make(chan error, 1)
+	go func() { done <- sup.open(context.Background(), NewSession(session(t, g))) }()
+	select {
+	case err := <-done:
+		assert.ErrorIs(t, err, errHandshakeTimeout)
+	case <-time.After(2 * time.Second):
+		t.Fatal("open stayed blocked after its handshake timeout")
+	}
+}
+
+func TestAbortDuringGatewayDiscoveryPreventsTheDial(t *testing.T) {
+	release := make(chan struct{})
+	var upgrades atomic.Int32
+	g := &fakeGateway{}
+	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/gateway") {
+			<-release
+			_ = json.NewEncoder(w).Encode(map[string]string{"url": "ws://" + strings.TrimPrefix(g.srv.URL, "http://") + "/ws"})
+			return
+		}
+		upgrades.Add(1)
+	}))
+	t.Cleanup(g.srv.Close)
+	t.Cleanup(func() { close(release) })
+	s := NewSession(session(t, g))
+	opened := make(chan error, 1)
+	go func() { opened <- s.Open() }()
+	time.Sleep(50 * time.Millisecond) // Open is waiting on GET /gateway
+	s.Abort()
+	release <- struct{}{}
+	select {
+	case err := <-opened:
+		assert.ErrorIs(t, err, errAborted)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Open dialed after the abort")
+	}
+	assert.Zero(t, upgrades.Load())
+}
+
+func TestTokenRejectedDuringGatewayDiscoveryHalts(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":0,"message":"401: Unauthorized"}`))
+	}))
+	t.Cleanup(srv.Close)
+	target, _ := url.Parse(srv.URL)
+	sup := &Supervisor{Budget: budget(), After: instant}
+	sup.Dial = func() Conn {
+		s, _ := discordgo.New("Bot test-token")
+		s.Client = &http.Client{Transport: rewrite{target}}
+		return NewSession(s)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	assert.Equal(t, StateHalted, sup.Run(ctx).Name)
+}

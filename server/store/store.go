@@ -105,7 +105,10 @@ type Channel struct {
 	CardPinned    bool      `json:"card_pinned,omitempty"`
 	// CardPosts counts cards posted to the channel; it varies the card
 	// nonce between a deleted card and its replacement.
-	CardPosts       int               `json:"card_posts,omitempty"`
+	CardPosts int `json:"card_posts,omitempty"`
+	// StatusPosts counts status lines posted to the channel; it varies the
+	// status line nonce between identical lines.
+	StatusPosts     int               `json:"status_posts,omitempty"`
 	CardEditedAt    time.Time         `json:"card_edited_at,omitzero"`
 	OutboundCursor  Cursor            `json:"outbound_cursor"`
 	InboundCursor   string            `json:"inbound_cursor,omitempty"`
