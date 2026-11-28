@@ -15,14 +15,21 @@ import (
 // Running reports a session state with a live turn.
 func Running(state string) bool { return state == "RUNNING" || state == "STARTING" }
 
+// StatusLine is one session's transition announcement.
+type StatusLine struct {
+	SessionID string
+	Text      string
+}
+
 // StatusLines compares observed session states with the last recorded ones
-// and returns one line per meaningful transition plus the new record. A
-// session seen for the first time only produces a line when it is running.
-func StatusLines(prev map[string]string, sessions []pluginsdk.Session) ([]string, map[string]string) {
+// and returns at most one line per session for a meaningful transition,
+// plus the new record. A session seen for the first time only produces a
+// line when it is running.
+func StatusLines(prev map[string]string, sessions []pluginsdk.Session) ([]StatusLine, map[string]string) {
 	sorted := append([]pluginsdk.Session(nil), sessions...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].StartedAt < sorted[j].StartedAt })
 	next := map[string]string{}
-	var lines []string
+	var lines []StatusLine
 	for _, s := range sorted {
 		next[s.ID] = s.State
 		old, seen := prev[s.ID]
@@ -30,22 +37,26 @@ func StatusLines(prev map[string]string, sessions []pluginsdk.Session) ([]string
 			continue
 		}
 		who := agentName(s)
+		text := ""
 		switch {
 		case Running(s.State):
 			if !Running(old) {
-				lines = append(lines, fmt.Sprintf("▶️ %s is working.", who))
+				text = fmt.Sprintf("▶️ %s is working.", who)
 			}
 		case !seen:
 		case s.State == "WAITING_FOR_INPUT" || s.State == "IDLE":
 			if Running(old) {
-				lines = append(lines, fmt.Sprintf("✅ %s finished its turn and is waiting for input.", who))
+				text = fmt.Sprintf("✅ %s finished its turn and is waiting for input.", who)
 			}
 		case s.State == "COMPLETED":
-			lines = append(lines, fmt.Sprintf("🏁 %s completed the session.", who))
+			text = fmt.Sprintf("🏁 %s completed the session.", who)
 		case s.State == "FAILED":
-			lines = append(lines, fmt.Sprintf("❌ %s failed.", who))
+			text = fmt.Sprintf("❌ %s failed.", who)
 		case s.State == "CANCELLED":
-			lines = append(lines, fmt.Sprintf("⏹️ %s was stopped.", who))
+			text = fmt.Sprintf("⏹️ %s was stopped.", who)
+		}
+		if text != "" {
+			lines = append(lines, StatusLine{SessionID: s.ID, Text: text})
 		}
 	}
 	return lines, next

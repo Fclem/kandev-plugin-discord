@@ -94,8 +94,18 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		}
 		return m.create(ctx, in)
 	case store.StatusFailed:
-		if !want || rec.UpdatedAt.After(m.StartedAt) {
+		if !want || !rec.UpdatedAt.Before(m.StartedAt) { // failed in this process: retried after a restart
 			return Result{Rec: rec}, nil
+		}
+		if rec.ChannelID != "" {
+			// The bot lost access to this channel in an earlier process:
+			// try it again (permissions may be restored) instead of
+			// creating a second channel. Converge rewrites its overwrites.
+			rec.Status, rec.LastError, rec.RolesKey, rec.UpdatedAt = store.StatusActive, "", "", in.Now
+			in.Rec = rec
+			res, err := m.Sync(ctx, in)
+			res.Changed = true
+			return res, err
 		}
 		return m.create(ctx, in)
 	case store.StatusActive:
@@ -299,7 +309,10 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		}
 		return res, nil
 	}
-	rec.Creation = nil // the outcomes below are definite: nothing was created
+	// The outcomes below are definite: nothing was created, and a former
+	// (deleted) channel ID must not stay routed. A failed record with a
+	// channel ID therefore always means a channel the bot lost access to.
+	rec.Creation, rec.ChannelID = nil, ""
 	switch {
 	case discordapi.HasCode(err, discordapi.CodeMaxGuildChannels):
 		rec.Status, rec.LastError = store.StatusCapacityBlocked, "the server reached Discord's 500-channel limit"

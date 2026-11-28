@@ -136,3 +136,11 @@
 
 - A partly posted batch of status lines is not reposted on retry.
 - A failed channel creation of a deleted task stops being retried.
+
+### Fixed (adversarial review round 7)
+
+- A message posted while provisioning is pending is caught up afterwards.
+- A status line is not reposted when another session's line joins its retry.
+- A channel the bot lost access to is marked failed and reported once in
+  `#kandev-status`, instead of being retried every minute; saving the
+  settings retries the same channel.

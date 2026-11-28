@@ -301,6 +301,12 @@ Wave 7:
   advances its nonce counter only once fully posted, so a partly posted
   batch retries with the same nonces; failed and capacity-blocked
   creations settle the creation inventory.
+- Adversarial review round 7 (3 findings, first round on Opus 5.5) fixed:
+  a message arriving while a bound workspace is unprovisioned marks its
+  channel for catch-up; status-line nonces are keyed by session, not batch
+  position; a 403 on an active channel marks it `failed` with one
+  `#kandev-status` note and no retries until the plugin restarts, when the
+  same channel is tried again (never a second one).
 
 ## Risks
 

@@ -67,18 +67,20 @@ func (m *Mirror) Sync(ctx context.Context, in Input) (Result, error) {
 		return res, err
 	}
 	lines, next := StatusLines(rec.SessionStates, in.Sessions)
-	for i, line := range lines {
-		// The nonce (batch position and text) makes a retry, which
-		// recomputes the same batch from the same saved states, return the
-		// lines already posted. StatusPosts advances, with the new states,
-		// only once the whole batch posted, keeping later identical lines
-		// distinct.
-		nonce := discordapi.Nonce(rec.ChannelID, "status", strconv.Itoa(rec.StatusPosts+i), line)
-		if _, err := m.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Content: line}, nonce); err != nil {
+	for _, line := range lines {
+		// The nonce (saved counter, session, and text) makes a retry, which
+		// recomputes the batch from the same saved states, return the lines
+		// already posted, even when another session's line joins the batch.
+		// StatusPosts advances, with the new states, only once the whole
+		// batch posted, keeping later identical lines distinct.
+		nonce := discordapi.Nonce(rec.ChannelID, "status", strconv.Itoa(rec.StatusPosts), line.SessionID, line.Text)
+		if _, err := m.API.MessageSendOnce(ctx, rec.ChannelID, &discordgo.MessageSend{Content: line.Text}, nonce); err != nil {
 			return res, fmt.Errorf("posting status line: %w", err)
 		}
 	}
-	rec.StatusPosts += len(lines)
+	if len(lines) > 0 {
+		rec.StatusPosts++
+	}
 	if !maps.Equal(next, rec.SessionStates) {
 		rec.SessionStates = next
 	}

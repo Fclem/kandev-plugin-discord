@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -128,14 +129,15 @@ func TestStatusLines(t *testing.T) {
 	s := func(state string) []pluginsdk.Session {
 		return []pluginsdk.Session{{ID: "s1", State: state, AgentDisplayName: "Claude"}}
 	}
+	line := func(text string) []StatusLine { return []StatusLine{{SessionID: "s1", Text: text}} }
 	lines, rec := StatusLines(nil, s("RUNNING"))
-	assert.Equal(t, []string{"▶️ **Claude** is working."}, lines)
+	assert.Equal(t, line("▶️ **Claude** is working."), lines)
 	lines, rec = StatusLines(rec, s("RUNNING"))
 	assert.Empty(t, lines)
 	lines, rec = StatusLines(rec, s("WAITING_FOR_INPUT"))
-	assert.Equal(t, []string{"✅ **Claude** finished its turn and is waiting for input."}, lines)
+	assert.Equal(t, line("✅ **Claude** finished its turn and is waiting for input."), lines)
 	lines, _ = StatusLines(rec, s("FAILED"))
-	assert.Equal(t, []string{"❌ **Claude** failed."}, lines)
+	assert.Equal(t, line("❌ **Claude** failed."), lines)
 	lines, _ = StatusLines(nil, s("COMPLETED"))
 	assert.Empty(t, lines, "first observation of a finished session is silent")
 }
@@ -415,4 +417,25 @@ func TestPartlyPostedStatusBatchIsNotRepostedOnRetry(t *testing.T) {
 	f.rec = res.Rec // saved, as syncActive does
 	f.sync(t, sessions, time.Now())
 	assert.Equal(t, []string{"▶️ **Claude** is working.", "▶️ **Codex** is working."}, f.texts())
+}
+
+func TestStatusRetryWithAnEarlierSessionJoiningIsNotReposted(t *testing.T) {
+	f := newMirror(t)
+	f.rec.SessionStates = map[string]string{"s0": "IDLE", "s1": "IDLE", "s2": "IDLE"}
+	sessions := []pluginsdk.Session{
+		{ID: "s0", State: "IDLE", AgentDisplayName: "A", StartedAt: "2026-11-25T09:00:00Z"},
+		{ID: "s1", State: "RUNNING", AgentDisplayName: "B", StartedAt: "2026-11-25T10:00:00Z"},
+		{ID: "s2", State: "RUNNING", AgentDisplayName: "C", StartedAt: "2026-11-25T10:00:01Z"},
+	}
+	f.host.Sessions["t1"] = sessions
+	f.api.FailNext("MessageSend", nil)                            // B posts
+	f.api.FailNext("MessageSend", &discordapi.Error{Status: 503}) // C fails
+	res, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Sessions: sessions, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	f.rec = res.Rec
+	later := slices.Clone(sessions)
+	later[0].State = "RUNNING" // A, which sorts first, starts before the retry
+	f.host.Sessions["t1"] = later
+	f.sync(t, later, time.Now())
+	assert.Equal(t, []string{"▶️ **B** is working.", "▶️ **A** is working.", "▶️ **C** is working."}, f.texts())
 }

@@ -728,3 +728,89 @@ func TestFailedCreationOfAVanishedTaskLeavesTheInventory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, pending, "a failed creation is settled")
 }
+
+func TestMessageDuringAProvisioningGapIsCaughtUp(t *testing.T) {
+	h := newHarness(t)
+	flaky := h.withFlakyStore()
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	ctx := context.Background()
+	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
+	send := func(text string, at time.Duration) {
+		stored := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(at)), ChannelID: rec.ChannelID, GuildID: guildID, Content: text, Author: author})
+		live := *stored // the gateway copy carries the member; REST history does not
+		live.Member = h.api.Members[author.ID]
+		h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: &live})
+		h.wait()
+	}
+	g, _ := h.b.guild(wsID)
+	h.api.Members[author.ID] = &discordgo.Member{Roles: []string{g.OperatorRoleID}}
+	h.b.ensureCaughtUp(ctx, rec, g, "")
+	send("m0", -3*time.Minute)
+	require.Len(t, h.host.Sent, 1)
+
+	// The operator role is deleted in Discord; re-provisioning recreates it
+	// and the role write fails once, so the workspace is held.
+	for i, r := range h.api.Roles[guildID] {
+		if r.ID == g.OperatorRoleID {
+			h.api.Roles[guildID] = append(h.api.Roles[guildID][:i], h.api.Roles[guildID][i+1:]...)
+			break
+		}
+	}
+	flaky.key = "workspace/" + wsID + "/guild"
+	flaky.fail = flaky.count.Load() + 1
+	h.b.reconcileAll()
+	h.wait()
+	_, ok := h.b.guild(wsID)
+	require.False(t, ok, "the workspace is held")
+	for _, r := range h.api.Roles[guildID] {
+		if r.Name == "Kandev Operator" { // alice is given the recreated role
+			h.api.Members[author.ID] = &discordgo.Member{Roles: []string{r.ID}}
+		}
+	}
+	send("m1", -2*time.Minute) // arrives while the workspace is held
+
+	h.b.reconcileAll() // provisions again
+	h.wait()
+	g, ok = h.b.guild(wsID)
+	require.True(t, ok)
+	send("m2", -time.Minute)
+	var texts []string
+	for _, s := range h.host.Sent {
+		texts = append(texts, s.Text)
+	}
+	assert.Equal(t, []string{"alice (Discord): m0", "alice (Discord): m1", "alice (Discord): m2"}, texts)
+}
+
+func TestLostChannelAccessStopsRetriesUntilRestart(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", AuthorType: "agent", Type: "message", Content: "answer", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.api.FailNext("MessageSend", &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"})
+	h.event(t, "e1", "turn.completed", map[string]any{"task_id": "1"})
+	failed := h.channel(t, "1")
+	assert.Equal(t, store.StatusFailed, failed.Status)
+	assert.Equal(t, rec.ChannelID, failed.ChannelID)
+	notes := h.texts(g.StatusChannelID)
+	require.NotEmpty(t, notes)
+	assert.Contains(t, notes[len(notes)-1], "lost access")
+
+	h.api.ResetCalls()
+	h.event(t, "e2", "turn.completed", map[string]any{"task_id": "1"})
+	h.reconcile(t)
+	assert.Empty(t, h.api.CallsTo("MessageSend"), "nothing is retried against the channel")
+	assert.Empty(t, h.api.CallsTo("GuildChannelCreate"), "no second channel")
+
+	// Settings saved: the plugin restarts and tries the channel again.
+	*h.clock = h.clock.Add(time.Minute)
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.ready(t)
+	h.reconcile(t)
+	assert.Equal(t, store.StatusActive, h.channel(t, "1").Status)
+	assert.Equal(t, rec.ChannelID, h.channel(t, "1").ChannelID)
+	assert.Contains(t, h.texts(rec.ChannelID), "answer")
+}

@@ -52,8 +52,20 @@ func (b *Bridge) onMessageCreate(_ context.Context, m *discordgo.MessageCreate) 
 	if m == nil || !inbound.Deliverable(m.Message) {
 		return
 	}
-	if _, _, ok := b.guildByID(m.GuildID); !ok || !b.events.add("msg:"+m.ID) {
-		return // not bound or not provisioned yet: catch-up picks it up later
+	if _, _, ok := b.guildByID(m.GuildID); !ok {
+		if _, bound := b.cfg.BindingForGuild(m.GuildID); bound {
+			// Provisioning is pending (first start, or roles unknown after
+			// a failed role change): the channel catches up from its saved
+			// cursor before its next live message, and on the reconcile
+			// that follows provisioning.
+			b.mu.Lock()
+			b.caughtUp[m.ChannelID] = -1
+			b.mu.Unlock()
+		}
+		return
+	}
+	if !b.events.add("msg:" + m.ID) {
+		return
 	}
 	msg := m.Message
 	b.sched.Do("chan:"+msg.ChannelID, func(ctx context.Context) {

@@ -3,6 +3,7 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -121,6 +122,10 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	res, err := mgr.Sync(ctx, input(rec))
 	if err != nil {
 		log.Printf("discord: task %s channel: %v", taskID, err)
+		if discordapi.IsForbidden(err) && res.Rec.Status == store.StatusActive && res.Rec.ChannelID != "" {
+			b.lostAccess(ctx, res.Rec, rec.ChannelID, g, err)
+			return
+		}
 	}
 	if res.Changed {
 		if err := b.st.PutChannel(ctx, res.Rec, rec.ChannelID); err != nil {
@@ -159,7 +164,25 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 		b.kickAfter(taskID, flushRetry) // a former role may still read the channel
 		return
 	}
-	b.syncActive(ctx, task, res.Rec)
+	if _, err := b.syncActive(ctx, task, res.Rec); discordapi.IsForbidden(err) {
+		if cur, found, rerr := b.st.Channel(ctx, taskID); rerr == nil && found && cur.ChannelID == res.Rec.ChannelID && cur.Status == store.StatusActive {
+			b.lostAccess(ctx, cur, cur.ChannelID, g, err)
+		}
+	}
+}
+
+// lostAccess records that Discord forbids the bot an active channel (its
+// overwrite or role permissions were removed): the record becomes failed,
+// so nothing is retried against it until the plugin restarts (settings
+// saved), when the channel is tried again. #kandev-status says so once.
+func (b *Bridge) lostAccess(ctx context.Context, rec store.Channel, previousChannelID string, g store.Guild, err error) {
+	rec.Status, rec.LastError, rec.UpdatedAt = store.StatusFailed, "the bot lost access to the channel: "+err.Error(), b.now()
+	if err := b.st.PutChannel(ctx, rec, previousChannelID); err != nil {
+		log.Printf("discord: saving channel record of task %s: %v", rec.TaskID, err)
+		return
+	}
+	log.Printf("discord: task %s: lost access to its channel; mirroring stopped: %v", rec.TaskID, err)
+	b.postStatus(ctx, g, fmt.Sprintf("⚠️ The bot lost access to <#%s>, so its task is no longer mirrored. Restore the bot's permissions there, then save the plugin settings to retry.", rec.ChannelID))
 }
 
 // closeHoldMax bounds how long a closing task's channel stays open waiting
@@ -196,6 +219,11 @@ func (b *Bridge) flushBeforeClose(ctx context.Context, mgr *channels.Manager, ta
 		}
 	}
 	if err != nil {
+		if discordapi.IsForbidden(err) {
+			// The bot lost access: nothing can be flushed or moved; stop.
+			b.lostAccess(ctx, res.Rec, in.Rec.ChannelID, g, err)
+			return res.Rec, false
+		}
 		log.Printf("discord: task %s: holding the close until permissions update: %v", task.ID, err)
 		return res.Rec, false
 	}
