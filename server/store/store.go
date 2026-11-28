@@ -120,8 +120,12 @@ type Channel struct {
 	ClosedAt         time.Time `json:"closed_at,omitzero"`
 	DeleteAfter      time.Time `json:"delete_after,omitzero"`
 	LastError        string    `json:"last_error,omitempty"`
-	Creation         *Creation `json:"creation,omitempty"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	// AccessLostAt is when Discord began refusing the bot this channel
+	// (403); it is kept across retries until a sync fully succeeds, so the
+	// #kandev-status note is posted once per outage.
+	AccessLostAt time.Time `json:"access_lost_at,omitzero"`
+	Creation     *Creation `json:"creation,omitempty"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // Prompt is one posted interaction prompt.

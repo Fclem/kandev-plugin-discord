@@ -101,6 +101,19 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 			return
 		}
 	}
+	if found && rec.Status == store.StatusFailed && rec.ChannelID != "" && rec.UpdatedAt.Before(b.accessRetryPoint(workspaceID)) {
+		// A channel the bot lost access to is tried again once per
+		// restart or successful provisioning (which every reconcile
+		// repeats, and which fails while the bot is out of the guild). It
+		// returns as active with unknown overwrites, so Converge rewrites
+		// them before anything posts, and an open task resumes mirroring
+		// while a closed or deleted one is archived or deleted.
+		rec.Status, rec.LastError, rec.RolesKey, rec.UpdatedAt = store.StatusActive, "", "", b.now()
+		if err := b.st.PutChannel(ctx, rec, rec.ChannelID); err != nil {
+			log.Printf("discord: saving channel record of task %s: %v", taskID, err)
+			return
+		}
+	}
 	mgr := b.channelManager()
 	input := func(r store.Channel) channels.Input {
 		return channels.Input{Task: task, Rec: r, Guild: g, ParentIdentifier: b.parentIdentifier(ctx, task), Now: b.now()}
@@ -164,25 +177,56 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 		b.kickAfter(taskID, flushRetry) // a former role may still read the channel
 		return
 	}
-	if _, err := b.syncActive(ctx, task, res.Rec); discordapi.IsForbidden(err) {
-		if cur, found, rerr := b.st.Channel(ctx, taskID); rerr == nil && found && cur.ChannelID == res.Rec.ChannelID && cur.Status == store.StatusActive {
-			b.lostAccess(ctx, cur, cur.ChannelID, g, err)
+	_, err = b.syncActive(ctx, task, res.Rec)
+	cur, found, rerr := b.st.Channel(ctx, taskID)
+	if rerr != nil || !found || cur.ChannelID != res.Rec.ChannelID || cur.Status != store.StatusActive {
+		return
+	}
+	switch {
+	case discordapi.IsForbidden(err):
+		b.lostAccess(ctx, cur, cur.ChannelID, g, err)
+	case err == nil && !cur.AccessLostAt.IsZero() && !b.needsCatchUp(cur.ChannelID):
+		// Mirroring and catch-up work again: the outage is over.
+		cur.AccessLostAt = time.Time{}
+		if err := b.st.PutChannel(ctx, cur, cur.ChannelID); err != nil {
+			log.Printf("discord: saving channel record of task %s: %v", taskID, err)
+			return
 		}
+		b.postStatus(ctx, g, fmt.Sprintf("🟢 The bot has access to <#%s> again; its task is mirrored again.", cur.ChannelID))
 	}
 }
 
-// lostAccess records that Discord forbids the bot an active channel (its
-// overwrite or role permissions were removed): the record becomes failed,
-// so nothing is retried against it until the plugin restarts (settings
-// saved), when the channel is tried again. #kandev-status says so once.
+// accessRetryPoint is when channels the bot lost access to are tried
+// again: records failed before it are reactivated. It is the later of the
+// process start and the workspace's last successful provisioning.
+func (b *Bridge) accessRetryPoint(workspaceID string) time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t := b.provisionedAt[workspaceID]; t.After(b.started) {
+		return t
+	}
+	return b.started
+}
+
+// lostAccess records that Discord forbids the bot a channel (its overwrite
+// or role permissions were removed, or the bot left the guild): the record
+// becomes failed, so nothing is sent to the channel until the next retry
+// point (accessRetryPoint). #kandev-status says so once per outage.
 func (b *Bridge) lostAccess(ctx context.Context, rec store.Channel, previousChannelID string, g store.Guild, err error) {
+	first := rec.AccessLostAt.IsZero()
+	if first {
+		rec.AccessLostAt = b.now()
+	}
 	rec.Status, rec.LastError, rec.UpdatedAt = store.StatusFailed, "the bot lost access to the channel: "+err.Error(), b.now()
 	if err := b.st.PutChannel(ctx, rec, previousChannelID); err != nil {
 		log.Printf("discord: saving channel record of task %s: %v", rec.TaskID, err)
 		return
 	}
-	log.Printf("discord: task %s: lost access to its channel; mirroring stopped: %v", rec.TaskID, err)
-	b.postStatus(ctx, g, fmt.Sprintf("⚠️ The bot lost access to <#%s>, so its task is no longer mirrored. Restore the bot's permissions there, then save the plugin settings to retry.", rec.ChannelID))
+	if !first {
+		return
+	}
+	log.Printf("discord: task %s: lost access to its channel; mirroring paused: %v", rec.TaskID, err)
+	b.postStatus(ctx, g, fmt.Sprintf("⚠️ The bot lost access to <#%s>, so its task is not mirrored. Restore the bot's permissions there; the plugin retries every 5 minutes.", rec.ChannelID))
 }
 
 // closeHoldMax bounds how long a closing task's channel stays open waiting

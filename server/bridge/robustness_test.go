@@ -783,7 +783,7 @@ func TestMessageDuringAProvisioningGapIsCaughtUp(t *testing.T) {
 	assert.Equal(t, []string{"alice (Discord): m0", "alice (Discord): m1", "alice (Discord): m2"}, texts)
 }
 
-func TestLostChannelAccessStopsRetriesUntilRestart(t *testing.T) {
+func TestLostChannelAccessWaitsForTheNextRetryPoint(t *testing.T) {
 	h := newHarness(t)
 	h.addTask("1", "Fix login")
 	h.ready(t)
@@ -802,15 +802,88 @@ func TestLostChannelAccessStopsRetriesUntilRestart(t *testing.T) {
 	h.api.ResetCalls()
 	h.event(t, "e2", "turn.completed", map[string]any{"task_id": "1"})
 	h.reconcile(t)
-	assert.Empty(t, h.api.CallsTo("MessageSend"), "nothing is retried against the channel")
+	assert.Empty(t, h.api.CallsTo("MessageSend"), "nothing is retried before the next provisioning or restart")
 	assert.Empty(t, h.api.CallsTo("GuildChannelCreate"), "no second channel")
 
-	// Settings saved: the plugin restarts and tries the channel again.
+	// The next pass provisions, which tries the channel again.
 	*h.clock = h.clock.Add(time.Minute)
-	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
 	h.ready(t)
 	h.reconcile(t)
 	assert.Equal(t, store.StatusActive, h.channel(t, "1").Status)
 	assert.Equal(t, rec.ChannelID, h.channel(t, "1").ChannelID)
 	assert.Contains(t, h.texts(rec.ChannelID), "answer")
+	assert.Zero(t, h.channel(t, "1").AccessLostAt)
+	notes = h.texts(g.StatusChannelID)
+	assert.Contains(t, notes[len(notes)-1], "access to", "the recovery is announced")
+}
+
+// A task closed while its channel was failed for lost access gets that
+// channel archived once access returns.
+func TestChannelOfATaskClosedDuringLostAccessIsClosedOnRetry(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", AuthorType: "agent", Type: "message", Content: "answer", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.api.FailNext("MessageSend", &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"})
+	h.event(t, "e1", "turn.completed", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+
+	// The task is archived while access is lost.
+	archived := "2026-11-25T12:00:30Z"
+	h.host.Tasks["1"].ArchivedAt = &archived
+	h.event(t, "e2", "task.updated", map[string]any{"task_id": "1", "archived_at": archived})
+
+	// Permissions restored, settings saved: restart.
+	*h.clock = h.clock.Add(time.Minute)
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.ready(t)
+	h.reconcile(t)
+	got := h.channel(t, "1")
+	assert.Equal(t, store.StatusArchived, got.Status)
+	assert.Equal(t, rec.ChannelID, got.ChannelID, "the same channel is archived")
+	assert.Contains(t, h.texts(rec.ChannelID), "answer", "its final output posted before closing")
+}
+
+// A bot removed from the guild (its lost-access note undeliverable) and
+// re-invited resumes mirroring when GUILD_CREATE provisions again.
+func TestReinvitedBotResumesMirroringWithoutRestart(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", AuthorType: "agent", Type: "message", Content: "answer", CreatedAt: "2026-11-25T12:00:01Z"})
+	missing := &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"}
+	h.api.FailNext("MessageSend", missing) // the task's post
+	h.api.FailNext("MessageSend", missing) // the #kandev-status note: the bot is out of the guild
+	h.event(t, "e1", "turn.completed", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+	for _, n := range h.texts(g.StatusChannelID) {
+		require.NotContains(t, n, "lost access", "the note never reached Discord")
+	}
+
+	// Re-invited: GUILD_CREATE provisions and reconciles.
+	*h.clock = h.clock.Add(time.Minute)
+	h.b.onGuildCreate(t.Context(), &discordgo.Guild{ID: guildID})
+	h.wait()
+	h.reconcile(t)
+	assert.Equal(t, store.StatusActive, h.channel(t, "1").Status, "mirroring resumes once the bot is back")
+	assert.Contains(t, h.texts(rec.ChannelID), "answer")
+}
+
+// A 403 reading history marks the channel failed instead of retrying the
+// catch-up every minute.
+func TestForbiddenCatchUpMarksTheChannelFailed(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	h.b.mu.Lock()
+	h.b.caughtUp[rec.ChannelID] = -1
+	h.b.mu.Unlock()
+	h.api.FailNext("ChannelMessages", &discordapi.Error{Status: 403, Code: 50013, Message: "Missing Permissions"})
+	h.b.catchUp("1", rec.ChannelID)
+	h.wait()
+	assert.Equal(t, store.StatusFailed, h.channel(t, "1").Status, "a 403 on the channel marks it failed (system design)")
 }

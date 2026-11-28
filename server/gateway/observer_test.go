@@ -97,7 +97,6 @@ func runSupervised(t *testing.T, s *discordgo.Session, budget Budget) (State, *S
 	t.Helper()
 	sup := &Supervisor{Dial: func() Conn { return s }, Budget: budget, After: instant}
 	Observe(s, sup)
-	t.Cleanup(func() { discordgo.Logger = nil })
 	s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -172,7 +171,6 @@ func TestReidentifyBeyondTheBudgetIsNeverSent(t *testing.T) {
 		}
 	}}
 	Observe(s, sup)
-	t.Cleanup(func() { discordgo.Logger = nil })
 	s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) { sup.Disconnected() })
 	sup.Run(ctx)
 
@@ -227,7 +225,6 @@ func TestInvalidatedSessionIsNeverResumed(t *testing.T) {
 	})
 	sup := &Supervisor{Budget: budget(), After: instant}
 	sup.Dial = freshSessions(t, g, sup)
-	t.Cleanup(func() { discordgo.Logger = nil })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	sup.Run(ctx)
@@ -272,7 +269,6 @@ func TestStalledHandshakeTimesOutAndHaltInterruptsIt(t *testing.T) {
 		}
 	}
 	sup.Dial = freshSessions(t, g, sup)
-	t.Cleanup(func() { discordgo.Logger = nil })
 	done := make(chan State, 1)
 	go func() { done <- sup.Run(context.Background()) }()
 	select {
@@ -294,7 +290,6 @@ func TestUnwritableBudgetRefusesToIdentify(t *testing.T) {
 	sup := &Supervisor{Budget: b, After: func(time.Duration) <-chan time.Time { cancel(); return instant(0) }}
 	sup.Report = func(st State) { reports = append(reports, st) }
 	sup.Dial = freshSessions(t, g, sup)
-	t.Cleanup(func() { discordgo.Logger = nil })
 	sup.Run(ctx)
 	assert.Equal(t, int32(0), g.dials.Load(), "no connection without a recorded reservation")
 	require.NotEmpty(t, reports)

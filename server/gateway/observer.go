@@ -31,6 +31,10 @@ var (
 	// blocked holds the session's shard fields while an op 9 re-identify
 	// is being refused (see refuseReidentify).
 	blocked *[2]int
+	// installLogger sets discordgo's package logger once: an abandoned
+	// handshake goroutine may still be logging when the next attempt is
+	// observed, so the variable must not be written again.
+	installLogger sync.Once
 )
 
 // Observe routes discordgo's package logger to sup: it charges every
@@ -45,7 +49,7 @@ func Observe(sess *discordgo.Session, sup *Supervisor) {
 	observerMu.Lock()
 	observer, observed, blocked = sup, sess, nil
 	observerMu.Unlock()
-	discordgo.Logger = observe
+	installLogger.Do(func() { discordgo.Logger = observe })
 }
 
 func observe(level, _ int, format string, args ...any) {

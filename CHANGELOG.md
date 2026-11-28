@@ -142,5 +142,14 @@
 - A message posted while provisioning is pending is caught up afterwards.
 - A status line is not reposted when another session's line joins its retry.
 - A channel the bot lost access to is marked failed and reported once in
-  `#kandev-status`, instead of being retried every minute; saving the
-  settings retries the same channel.
+  `#kandev-status`, instead of being retried every minute.
+
+### Fixed (adversarial review round 8)
+
+- A channel the bot lost access to is retried at every reconcile once the
+  server is reachable again (for example after re-inviting the bot), and
+  is archived if its task closed meanwhile; the recovery is announced.
+- Losing Read Message History marks the channel failed instead of retrying
+  every minute.
+- Installing the gateway log observer no longer races a handshake that is
+  still finishing in the background (found while verifying this round).

@@ -129,6 +129,12 @@ func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild st
 	}
 	if _, err := b.inboundHandler(guild).CatchUp(ctx, rec, until); err != nil {
 		log.Printf("discord: catching up channel of task %s: %v", rec.TaskID, err)
+		if discordapi.IsForbidden(err) {
+			// The bot cannot read the channel's history: retrying every
+			// minute would only pile up invalid requests.
+			b.lostAccess(ctx, rec, rec.ChannelID, guild, err)
+			return false
+		}
 		b.retryCatchUp(rec.ChannelID)
 		return false
 	}

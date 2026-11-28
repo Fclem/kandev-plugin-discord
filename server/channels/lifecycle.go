@@ -94,18 +94,11 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		}
 		return m.create(ctx, in)
 	case store.StatusFailed:
-		if !want || !rec.UpdatedAt.Before(m.StartedAt) { // failed in this process: retried after a restart
+		// A failed record with a channel is a channel the bot lost access
+		// to: the bridge decides when to try it again (Reactivate). One
+		// without a channel is a failed creation, retried once per process.
+		if rec.ChannelID != "" || !want || !rec.UpdatedAt.Before(m.StartedAt) {
 			return Result{Rec: rec}, nil
-		}
-		if rec.ChannelID != "" {
-			// The bot lost access to this channel in an earlier process:
-			// try it again (permissions may be restored) instead of
-			// creating a second channel. Converge rewrites its overwrites.
-			rec.Status, rec.LastError, rec.RolesKey, rec.UpdatedAt = store.StatusActive, "", "", in.Now
-			in.Rec = rec
-			res, err := m.Sync(ctx, in)
-			res.Changed = true
-			return res, err
 		}
 		return m.create(ctx, in)
 	case store.StatusActive:

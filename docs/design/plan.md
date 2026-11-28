@@ -307,6 +307,13 @@ Wave 7:
   position; a 403 on an active channel marks it `failed` with one
   `#kandev-status` note and no retries until the plugin restarts, when the
   same channel is tried again (never a second one).
+- Adversarial review round 8 (3 findings) fixed: a channel failed for
+  lost access (posting, channel edits, or reading history) is reactivated
+  at each retry point — process start or a successful provisioning, which
+  every reconcile repeats and which fails while the bot is out of the
+  guild — whether or not its task still wants it, so a closed task's
+  channel is archived; `#kandev-status` gets one note per outage and one
+  when access returns.
 
 ## Risks
 

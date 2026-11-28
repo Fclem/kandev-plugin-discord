@@ -73,7 +73,10 @@ type Bridge struct {
 	readyGen int
 	caughtUp map[string]int
 	// notices is the lifecycle notice state per guild (notices.go).
-	notices         map[string]*guildNotices
+	notices map[string]*guildNotices
+	// provisionedAt is each workspace's last successful provisioning; it
+	// is a retry point for channels the bot lost access to.
+	provisionedAt   map[string]time.Time
 	downNoticeDelay time.Duration
 }
 
@@ -92,11 +95,12 @@ func New(d Deps) *Bridge {
 	b := &Bridge{
 		cfg: d.Config, api: d.API, host: d.Host, st: d.Store, halted: d.Halted, haltNotifier: d.HaltNotifier,
 		now: d.Now, started: d.Now(), ctx: d.Context, sched: NewScheduler(d.Context),
-		events:   newLRU(4096),
-		guilds:   map[string]store.Guild{},
-		syncing:  map[string]bool{},
-		caughtUp: map[string]int{},
-		notices:  map[string]*guildNotices{},
+		events:        newLRU(4096),
+		guilds:        map[string]store.Guild{},
+		syncing:       map[string]bool{},
+		caughtUp:      map[string]int{},
+		notices:       map[string]*guildNotices{},
+		provisionedAt: map[string]time.Time{},
 		// A routine reconnect takes seconds; only a longer outage is noted.
 		downNoticeDelay: time.Minute,
 	}
@@ -231,6 +235,7 @@ func (b *Bridge) provisionGuild(ctx context.Context, binding config.Binding) boo
 	}
 	if err == nil {
 		b.guilds[binding.WorkspaceID] = rec
+		b.provisionedAt[binding.WorkspaceID] = b.now()
 	}
 	b.mu.Unlock()
 	b.categoryMu.Unlock()
