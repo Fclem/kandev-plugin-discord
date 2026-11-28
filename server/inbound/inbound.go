@@ -118,8 +118,7 @@ func (h *Handler) CatchUp(ctx context.Context, rec store.Channel, until string) 
 			case !Deliverable(m):
 				rec, err = h.advance(rec, m.ID), nil
 			case rec.InboundInflight != m.ID && h.Now().Sub(snowflakeTime(m.ID)) > h.MaxAge:
-				h.reply(ctx, m, ReactFailed, "Not delivered — the bridge was offline when this was posted. Send it again if it still applies.")
-				rec, err = h.finish(ctx, rec, m.ID)
+				rec, err = h.expire(ctx, rec, m)
 			default:
 				rec, err = h.Handle(ctx, rec, m)
 			}
@@ -134,6 +133,21 @@ func (h *Handler) CatchUp(ctx context.Context, rec store.Channel, until string) 
 			return rec, nil
 		}
 	}
+}
+
+// expire answers a message too old to deliver: an operator is told to send
+// it again, anyone else gets the usual ⛔.
+func (h *Handler) expire(ctx context.Context, rec store.Channel, m *discordgo.Message) (store.Channel, error) {
+	_, operator, err := h.Authorize(ctx, m)
+	if err != nil {
+		return rec, fmt.Errorf("checking the author's roles: %w", err)
+	}
+	if operator {
+		h.reply(ctx, m, ReactFailed, "Not delivered — the bridge was offline when this was posted. Send it again if it still applies.")
+	} else {
+		h.react(ctx, m, ReactDenied)
+	}
+	return h.finish(ctx, rec, m.ID)
 }
 
 func (h *Handler) advance(rec store.Channel, id string) store.Channel {

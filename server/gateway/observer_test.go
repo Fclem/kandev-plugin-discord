@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -120,15 +121,17 @@ func TestFatalCloseAfterReadyStopsWithoutRedialing(t *testing.T) {
 	assert.Equal(t, int32(1), g.dials.Load(), "no second connection after a fatal close")
 }
 
-func TestEveryIdentifyIsChargedIncludingInvalidSession(t *testing.T) {
+func TestInvalidSessionReconnectsInsteadOfReidentifyingInPlace(t *testing.T) {
 	b := budget()
 	var g *fakeGateway
-	g = newFakeGateway(t, func(c *websocket.Conn, _ int32) {
+	g = newFakeGateway(t, func(c *websocket.Conn, dial int32) {
 		if !g.readIdentify(c) {
 			return
 		}
-		_ = c.WriteJSON(map[string]any{"op": 9, "d": false}) // invalid session: discordgo re-identifies in place
-		if !g.readIdentify(c) {
+		if dial == 1 {
+			_ = c.WriteJSON(map[string]any{"op": 9, "d": false}) // invalid session
+			_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+			g.readIdentify(c) // counted if discordgo re-identified on this socket
 			return
 		}
 		ready(c, 1)
@@ -136,13 +139,58 @@ func TestEveryIdentifyIsChargedIncludingInvalidSession(t *testing.T) {
 		_ = c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4004, "Authentication failed."))
 		time.Sleep(100 * time.Millisecond)
 	})
-	final, _ := runSupervised(t, session(t, g), b)
+	sup := &Supervisor{Budget: b, After: instant}
+	sup.Dial = freshSessions(t, g, sup)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	final := sup.Run(ctx)
 	assert.Equal(t, StateFatal, final.Name)
-	assert.Equal(t, 4004, final.CloseCode)
-	assert.Equal(t, int32(2), g.identifies.Load())
+	assert.Equal(t, int32(2), g.dials.Load(), "a new connection after the invalid session")
+	assert.Equal(t, int32(2), g.identifies.Load(), "one IDENTIFY per connection")
 	n, err := b.Count(context.Background(), time.Now())
 	require.NoError(t, err)
 	assert.Equal(t, 2, n, "both IDENTIFY packets charged")
+}
+
+func TestRepeatedInvalidSessionsBackOffAndSpaceIdentifies(t *testing.T) {
+	var g *fakeGateway
+	g = newFakeGateway(t, func(c *websocket.Conn, _ int32) {
+		for g.readIdentify(c) {
+			_ = c.WriteJSON(map[string]any{"op": 9, "d": false}) // over the identify rate limit, every time
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var sleeps []time.Duration
+	sup := &Supervisor{Budget: budget(), After: func(d time.Duration) <-chan time.Time {
+		mu.Lock()
+		sleeps = append(sleeps, d)
+		mu.Unlock()
+		return instant(d)
+	}}
+	dial := freshSessions(t, g, sup)
+	sup.Dial = func() Conn {
+		if g.dials.Load() >= 6 {
+			cancel()
+		}
+		return dial()
+	}
+	sup.Run(ctx)
+	assert.Equal(t, g.dials.Load(), g.identifies.Load(), "never more than one IDENTIFY per connection")
+	mu.Lock()
+	defer mu.Unlock()
+	var gaps, backoffs []time.Duration
+	for _, d := range sleeps {
+		if d > IdentifyGap-time.Second && d <= IdentifyGap {
+			gaps = append(gaps, d)
+		} else {
+			backoffs = append(backoffs, d)
+		}
+	}
+	assert.NotEmpty(t, gaps, "IDENTIFYs are spaced by the identify gap")
+	require.GreaterOrEqual(t, len(backoffs), 3)
+	assert.Greater(t, backoffs[len(backoffs)-1], backoffs[0], "the backoff grows while connections keep failing")
 }
 
 func TestReidentifyBeyondTheBudgetIsNeverSent(t *testing.T) {

@@ -323,6 +323,11 @@ Wave 7:
   while a session runs is marked recovered; prompt and step nonces include
   the channel's reopen count, so prompts closed on archive are posted
   again with live buttons after a quick reopen.
+- Adversarial review round 11 (3 findings) fixed: an invalid session closes
+  the connection and reconnects with growing backoff (IDENTIFYs at least
+  6 s apart) instead of re-identifying in place; unreadable settings are
+  retried and reported on the card; a stale message from a non-operator
+  gets ⛔ during catch-up.
 
 ## Risks
 
@@ -344,9 +349,11 @@ Wave 7:
   grant, and are audited.
 - **Event loss.** Cursor pulls and the 5-minute reconcile bound the delay.
 - **Identify budget.** A persisted counter refuses to connect after 900
-  identifies in 24 h. A reservation is written before every IDENTIFY
-  (including an invalid-session re-identify) and taken back when the attempt
-  fails before sending it; an unwritable counter refuses.
+  identifies in 24 h. A reservation is written before every IDENTIFY and
+  taken back when the attempt fails before sending it; an unwritable
+  counter refuses. IDENTIFYs are at least 6 s apart, an invalid session
+  (op 9) closes the connection instead of re-identifying on it, and the
+  backoff only resets after a connection stayed up for a minute.
 - **No gateway resume.** Unlike the system design's "resume with
   `resume_gateway_url`", each connection attempt uses a fresh discordgo
   session and IDENTIFYs: discordgo keeps a session Discord may have

@@ -169,3 +169,13 @@
   outage is announced too.
 - Pending prompts get live buttons again when a channel is reopened soon
   after being archived.
+
+### Fixed (adversarial review round 11)
+
+- An invalid session (op 9) no longer makes the bridge re-identify in a
+  tight loop that spends the whole daily identify budget: it reconnects
+  with growing backoff, at most one IDENTIFY per 6 s.
+- Settings that cannot be read at startup are retried, and the settings
+  card says so instead of showing the previous process's state.
+- A non-operator's message found by catch-up after the delivery window
+  gets ⛔, not an invitation to send it again.

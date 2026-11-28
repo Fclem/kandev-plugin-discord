@@ -161,8 +161,8 @@ func (s *Supervisor) ObserveClose(code int) {
 	s.lastClose.Store(int64(code))
 }
 
-// identifySent notes that discordgo wrote an IDENTIFY; its reservation was
-// made before (Run for the first, reserveIdentify for an op 9 re-identify).
+// identifySent notes that discordgo wrote the attempt's IDENTIFY; Run
+// reserved its budget before dialing.
 func (s *Supervisor) identifySent() {
 	s.init()
 	s.identified.Store(true)
@@ -175,16 +175,9 @@ func (s *Supervisor) ctx() context.Context {
 	return context.Background()
 }
 
-// reserveIdentify reserves budget for an op 9 re-identify. A full budget or
-// a counter that cannot be read or written refuses.
-func (s *Supervisor) reserveIdentify() bool {
-	s.init()
-	_, ok, err := s.Budget.Reserve(s.ctx(), s.Now(), IdentifyLimit)
-	return err == nil && ok
-}
-
-// refuse wakes Run after an op 9 re-identify was refused: the socket is
-// open but unidentified, so Run closes it and waits for budget room.
+// refuse wakes Run after discordgo's op 9 re-identify was refused: the
+// socket is open but unidentified, so Run closes it and reconnects with
+// backoff (and a fresh IDENTIFY reservation).
 func (s *Supervisor) refuse() {
 	s.refused.Store(true)
 	s.Disconnected()
@@ -203,17 +196,30 @@ const haltReason = "Discord rejected the bot token (HTTP 401): reset the token a
 
 var errHandshakeTimeout = errors.New("the gateway handshake timed out")
 
+// IdentifyGap is the minimum time between two IDENTIFYs: Discord answers
+// an IDENTIFY sent over its concurrency limit (one per 5 s) with an
+// invalid session (op 9).
+const IdentifyGap = 6 * time.Second
+
+// StableAfter is how long a connection must stay up for the next failure
+// to start over from the shortest backoff.
+const StableAfter = time.Minute
+
 // Run blocks until ctx ends or a fatal condition stops the gateway.
 func (s *Supervisor) Run(ctx context.Context) State {
 	s.init()
 	s.runCtx.Store(&ctx)
 	attempt := 0
+	var lastIdentify time.Time
 	for {
 		if ctx.Err() != nil {
 			return s.stop(StateStopped, 0, "")
 		}
 		if s.Halted() {
 			return s.stop(StateHalted, 0, haltReason)
+		}
+		if wait := IdentifyGap - s.Now().Sub(lastIdentify); !lastIdentify.IsZero() && wait > 0 && !s.sleep(ctx, wait) {
+			continue // stopped while waiting
 		}
 		now := s.Now()
 		count, ok, err := s.Budget.Reserve(ctx, now, IdentifyLimit)
@@ -235,15 +241,15 @@ func (s *Supervisor) Run(ctx context.Context) State {
 		s.Report(State{Name: StateConnecting, Identifies24h: count + 1})
 		conn := s.Dial()
 		err = s.open(ctx, conn)
-		if !s.identified.Load() {
+		if s.identified.Load() {
+			lastIdentify = s.Now()
+		} else if err := s.Budget.Release(s.ctx(), now); err != nil {
 			// The attempt failed before its IDENTIFY: give the budget back.
-			if err := s.Budget.Release(s.ctx(), now); err != nil {
-				s.Report(State{Name: StateReconnecting, Reason: "identify counter not released: " + err.Error()})
-			}
+			s.Report(State{Name: StateReconnecting, Reason: "identify counter not released: " + err.Error()})
 		}
 		if err != nil {
-			if s.refused.Swap(false) || s.Halted() || ctx.Err() != nil {
-				continue // the loop reports the refusal, the halt, or the stop
+			if s.Halted() || ctx.Err() != nil {
+				continue // the loop reports the halt or the stop
 			}
 			if tokenRejected(err) {
 				_ = conn.Close()
@@ -257,12 +263,16 @@ func (s *Supervisor) Run(ctx context.Context) State {
 				_ = conn.Close()
 				return s.stop(StateFatal, code, fatalReasons[code])
 			}
-			s.Report(State{Name: StateReconnecting, Identifies24h: count + 1, Reason: openReason(err)})
+			reason := openReason(err)
+			if s.refused.Swap(false) {
+				reason = "Discord invalidated the session (op 9)"
+			}
+			s.Report(State{Name: StateReconnecting, Identifies24h: count + 1, Reason: reason})
 			s.sleep(ctx, s.backoff(attempt))
 			attempt++
 			continue
 		}
-		attempt = 0
+		connectedAt := s.Now()
 		s.Report(State{Name: StateConnected, Identifies24h: count + 1})
 		select {
 		case <-ctx.Done():
@@ -273,14 +283,22 @@ func (s *Supervisor) Run(ctx context.Context) State {
 			if s.Halted() {
 				return s.stop(StateHalted, 0, haltReason)
 			}
-			if s.refused.Swap(false) {
-				continue // the budget check reports the refusal and waits
-			}
 			if code := s.fatalClose(); code != 0 {
 				return s.stop(StateFatal, code, fatalReasons[code])
 			}
-			s.Report(State{Name: StateReconnecting, Reason: "gateway connection closed"})
-			s.sleep(ctx, s.backoff(0))
+			// Only a connection that stayed up resets the backoff: one
+			// dropped right after connecting (an invalid session, a gateway
+			// that keeps closing) keeps backing off.
+			if s.Now().Sub(connectedAt) >= StableAfter {
+				attempt = 0
+			}
+			reason := "gateway connection closed"
+			if s.refused.Swap(false) {
+				reason = "Discord invalidated the session (op 9)"
+			}
+			s.Report(State{Name: StateReconnecting, Reason: reason})
+			s.sleep(ctx, s.backoff(attempt))
+			attempt++
 		}
 	}
 }

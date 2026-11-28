@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kdlbs/kandev/pluginsdk"
@@ -117,4 +119,39 @@ func TestActionBeforeHostInjectionIs503(t *testing.T) {
 	resp, err := newTestPlugin(nil).HandleAction(context.Background(), &pluginsdk.PluginActionRequest{ActionKey: actionConnectionTest})
 	require.NoError(t, err)
 	assert.Equal(t, 503, resp.Status)
+}
+
+// failingConfigHost fails GetConfig a number of times before answering.
+type failingConfigHost struct {
+	configHost
+	failures *int
+}
+
+func (h failingConfigHost) GetConfig(ctx context.Context) (map[string]any, error) {
+	if *h.failures > 0 {
+		*h.failures--
+		return nil, errors.New("vault unavailable")
+	}
+	return h.configHost.GetConfig(ctx)
+}
+
+func TestUnreadableSettingsAreRetriedAndReplaceStaleHealth(t *testing.T) {
+	ctx := context.Background()
+	failures := 2
+	h := failingConfigHost{configHost{MemoryHost: store.NewMemoryHost(), config: map[string]any{"bot_token": "MTIz.secret"}}, &failures}
+	st := store.New(h)
+	require.NoError(t, st.PutHealth(ctx, store.Health{GatewayState: "connected"})) // the previous process's
+	var waits []time.Duration
+	raw := readSettings(ctx, h, st, func(d time.Duration) <-chan time.Time {
+		got, ok, err := st.Health(ctx)
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "error", got.GatewayState, "the card no longer shows the stale state while retrying")
+		waits = append(waits, d)
+		c := make(chan time.Time, 1)
+		c <- time.Time{}
+		return c
+	})
+	assert.Equal(t, "MTIz.secret", raw["bot_token"])
+	assert.Equal(t, []time.Duration{time.Second, 2 * time.Second}, waits)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/kdlbs/kandev/pluginsdk"
@@ -66,11 +67,7 @@ func (p *discordPlugin) SetHost(h pluginsdk.Host) {
 func (p *discordPlugin) runBridge(h pluginsdk.Host) {
 	ctx := context.Background()
 	st := store.New(h)
-	raw, err := h.GetConfig(ctx)
-	if err != nil {
-		log.Printf("discord: reading settings: %v", err)
-		return
-	}
+	raw := readSettings(ctx, h, st, time.After)
 	cfg, cfgErr := config.Parse(raw)
 	if cfgErr != nil {
 		log.Printf("discord: settings are incomplete; the bridge stays off: %v", cfgErr)
@@ -91,6 +88,24 @@ func (p *discordPlugin) runBridge(h pluginsdk.Host) {
 	// REST stays on sess; each gateway connection gets a fresh session.
 	final := b.Run(func() *discordgo.Session { return discordapi.NewSession(cfg.BotToken) })
 	log.Printf("discord: gateway stopped: %s", final.Name)
+}
+
+// readSettings reads the settings, retrying with backoff until it works: a
+// failed read (the vault holding the bot token unavailable) must not leave
+// the bridge off until the next restart, nor the previous process's health
+// on the settings card.
+func readSettings(ctx context.Context, h pluginsdk.Host, st *store.Store, after func(time.Duration) <-chan time.Time) map[string]any {
+	for wait := time.Second; ; wait = min(2*wait, time.Minute) {
+		raw, err := h.GetConfig(ctx)
+		if err == nil {
+			return raw
+		}
+		log.Printf("discord: reading settings failed; retrying in %s: %v", wait, err)
+		if err := st.PutHealth(ctx, store.Health{GatewayState: "error", Reason: "reading the settings failed; retrying", CheckedAt: time.Now().UTC()}); err != nil {
+			log.Printf("discord: saving health: %v", err)
+		}
+		<-after(wait)
+	}
 }
 
 func (p *discordPlugin) currentBridge() *bridge.Bridge {

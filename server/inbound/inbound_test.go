@@ -127,6 +127,7 @@ func TestAlreadyHandledOrInFlightMessagesAreNeverSentTwice(t *testing.T) {
 func TestCatchUpDeliversRecentAndRejectsStaleMessages(t *testing.T) {
 	f := newFixture(t)
 	stale := f.api.AddMessage(f.msg(now.Add(-40*time.Minute), 1, "op", "old news"))
+	staleViewer := f.api.AddMessage(f.msg(now.Add(-39*time.Minute), 1, "viewer", "hello"))
 	bot := f.api.AddMessage(&discordgo.Message{ID: idAt(now.Add(-20*time.Minute), 1), ChannelID: f.rec.ChannelID, Content: "card", Author: f.api.BotUser})
 	recent := f.api.AddMessage(f.msg(now.Add(-5*time.Minute), 1, "op", "still relevant"))
 
@@ -135,6 +136,7 @@ func TestCatchUpDeliversRecentAndRejectsStaleMessages(t *testing.T) {
 	assert.Equal(t, recent.ID, rec.InboundCursor)
 	assert.Equal(t, []kandev.SentMessage{{TaskID: "t1", Text: "Alice (Discord): still relevant"}}, f.host.Sent)
 	assert.Equal(t, []string{ReactFailed}, f.api.ReactionsOn(stale.ID))
+	assert.Equal(t, []string{ReactDenied}, f.api.ReactionsOn(staleViewer.ID), "a non-operator is refused, not invited to resend")
 	assert.Empty(t, f.api.ReactionsOn(bot.ID))
 	assert.Equal(t, []string{ReactDelivered}, f.api.ReactionsOn(recent.ID))
 

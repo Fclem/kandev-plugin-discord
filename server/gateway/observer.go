@@ -37,9 +37,9 @@ var (
 	installLogger sync.Once
 )
 
-// Observe routes discordgo's package logger to sup: it charges every
-// IDENTIFY to the budget, refuses an op 9 re-identify the budget has no
-// room for, and records websocket close codes that discordgo otherwise
+// Observe routes discordgo's package logger to sup: it notes the IDENTIFY
+// of each attempt, refuses discordgo's in-socket re-identify after an
+// invalid session (op 9), and records websocket close codes that discordgo otherwise
 // swallows after the handshake. The session must log at discordgo.LogDebug
 // for IDENTIFY to be visible. Arguments are never printed verbatim: the
 // IDENTIFY dump carries the token and event dumps carry message content.
@@ -64,9 +64,12 @@ func observe(level, _ int, format string, args ...any) {
 		sup.identifySent()
 		return
 	case format == reidentifyFormat:
-		if !sup.reserveIdentify() {
-			refuseReidentify(sess)
-		}
+		// discordgo re-identifies at once after an invalid session (op 9),
+		// which Discord sends for an IDENTIFY over its rate limit: an
+		// in-socket loop would spend the whole identify budget in seconds.
+		// The re-identify is always refused; the supervisor closes the
+		// socket and reconnects with backoff.
+		refuseReidentify(sess)
 		return
 	case format == reidentifyFailedFormat && endRefusal(sess):
 		sup.refuse()
