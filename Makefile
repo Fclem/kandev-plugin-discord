@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := build
 
 .PHONY: build run test test-backend test-ui test-package-verifier \
-	test-release-version audit check-format fmt vet \
+	test-release-version coverage audit check-format fmt vet \
 	sdk-check package package-host package-file verify-package verify-package-host clean
 
 # BIN and VERSION must match manifest.yaml's id and version (PKG_OUT is
@@ -16,13 +16,24 @@ PKG_OUT := $(notdir $(BIN))-$(VERSION).tar.gz
 # Override with an absolute backend path: make package KANDEV_TOOLING=/path/apps/backend
 KANDEV_TOOLING ?= $(CURDIR)/.build/kandev-tooling/apps/backend
 
+# Coverage output (go.out, go.html, go-func.txt, ui.lcov, summary.md).
+COVERAGE_DIR ?= .build/coverage
+# Minimum total Go statement coverage, in percent, across ./server/... with
+# -coverpkg: the total when the gate was set (93.3%), rounded down, minus 2.
+COVERAGE_MIN ?= 91
+
 # Run after npm ci so both installed SDK records and the lockfile are checked.
 sdk-check:
-	go run github.com/kdlbs/kandev/pluginsdk/cmd/kandev-sdk-check@v0.1.0 --manifest manifest.yaml --frontend-sdk node_modules/@kdlbs/plugin-sdk
+	go run github.com/kdlbs/kandev/pluginsdk/cmd/kandev-sdk-check@v0.5.0 --manifest manifest.yaml --frontend-sdk node_modules/@kdlbs/plugin-sdk
+
+# Prerequisite of build and package targets, so nothing is built against an
+# SDK the manifest does not declare. `SDK_GATE=` skips it for local
+# experiments only; CI and the release workflow run `make sdk-check`.
+SDK_GATE ?= sdk-check
 
 ## Build the plugin binary for the host platform (development use). kandev
 ## itself always installs from `make package`/`package-host` output, not this.
-build: sdk-check
+build: $(SDK_GATE)
 	mkdir -p bin
 	go build -o $(BIN) ./server
 
@@ -46,6 +57,29 @@ test-package-verifier:
 test-release-version:
 	sh scripts/test-verify-release-version.sh
 
+## Race-checked Go tests with cross-package coverage, an HTML report, a
+## per-package summary, and the UI tests with Node's coverage (lcov).
+## Fails when total Go coverage drops below COVERAGE_MIN. Node merges
+## coverage per module URL, and settings-card.test.js imports cache-busted
+## copies of the bundle (?t=N) that would compete in the report, so it runs
+## without coverage; settings-card-render.test.js covers the whole bundle.
+coverage:
+	mkdir -p $(COVERAGE_DIR)
+	go test -race -covermode=atomic -coverpkg=./server/... -coverprofile=$(COVERAGE_DIR)/go.out ./server/...
+	go tool cover -func=$(COVERAGE_DIR)/go.out > $(COVERAGE_DIR)/go-func.txt
+	go tool cover -html=$(COVERAGE_DIR)/go.out -o $(COVERAGE_DIR)/go.html
+	node --test tests/settings-card.test.js
+	node --test --experimental-test-coverage --test-coverage-include=ui/bundle.js \
+		--test-reporter=spec --test-reporter-destination=stdout \
+		--test-reporter=lcov --test-reporter-destination=$(COVERAGE_DIR)/ui.lcov \
+		tests/settings-card-render.test.js
+	sh scripts/coverage-summary.sh $(COVERAGE_DIR)/go.out $(COVERAGE_DIR)/ui.lcov > $(COVERAGE_DIR)/summary.md
+	@cat $(COVERAGE_DIR)/summary.md
+	@total=$$(awk '$$1 == "total:" { sub(/%/, "", $$3); print $$3 }' $(COVERAGE_DIR)/go-func.txt); \
+		echo "Go total statement coverage: $$total% (minimum $(COVERAGE_MIN)%); HTML report: $(COVERAGE_DIR)/go.html"; \
+		awk -v total="$$total" -v min="$(COVERAGE_MIN)" 'BEGIN { exit !(total + 0 >= min + 0) }' || \
+		{ echo "Go coverage $$total% is below COVERAGE_MIN=$(COVERAGE_MIN)%"; exit 1; }
+
 audit:
 	npm audit --audit-level=high
 
@@ -62,7 +96,7 @@ vet:
 ## manifest.yaml's runtime.executables, stage manifest.yaml + ui/ alongside
 ## them, and pack the tree into $(PKG_OUT) with
 ## backend-owned cmd/plugin-pack from the pinned tooling checkout. Install the tarball via Settings > Plugins or curl -F package=@...
-package: sdk-check
+package: $(SDK_GATE)
 	rm -rf $(STAGE)
 	mkdir -p $(STAGE)/server
 	cp manifest.yaml $(STAGE)/manifest.yaml
@@ -78,7 +112,7 @@ package: sdk-check
 
 ## Package for the host platform only — faster local iteration than the full
 ## 5-platform `make package` (matches plugin-pack's -platform-only).
-package-host: sdk-check
+package-host: $(SDK_GATE)
 	rm -rf $(STAGE)
 	mkdir -p $(STAGE)/server
 	cp manifest.yaml $(STAGE)/manifest.yaml

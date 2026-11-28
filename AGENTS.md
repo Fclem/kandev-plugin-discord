@@ -7,33 +7,45 @@ guide (`kdlbs/kandev`: `.agents/skills/create-kandev-plugin/SKILL.md`,
 
 The design lives in `docs/design/`:
 
-- `spec.md` is the behavior contract.
+- `requirements.md` is the behavior contract and `system-design.md` the
+  plugin design; both mirror `kdlbs/kandev`, which stays canonical.
+- `host-controls-*.md` and the ADR describe the Host contract the plugin uses.
 - `plan.md` and the `task-*.md` files are the phased implementation.
 
-Host tasks 01–04 and 15–17 belong to `kdlbs/kandev`. Do not implement them
-here. Plugin tasks 05–14 belong to this repository.
+Host tasks 01–04 and 15–17 belong to `kdlbs/kandev` and are merged
+(kdlbs/kandev#5438). Do not implement them here. Plugin tasks 05–14 belong to
+this repository.
 
 Keep `id` synchronized across `manifest.yaml`, `go.mod`, `Makefile` `BIN`, and
 `window.registerKandevPlugin(...)` in `ui/bundle.js`. Keep `version` equal in
 `manifest.yaml` and `Makefile`. Declare only the capabilities and actions the
 code exercises.
 
-Go and frontend SDKs share version `0.1.0`
-(`github.com/kdlbs/kandev/pluginsdk v0.1.0`, `@kdlbs/plugin-sdk` `0.1.0`).
-Do not add SDK `replace` directives or sibling-source builds. Raise the SDK
-and `min_kandev_version` together when adopting new Host APIs.
+SDK state: `go.mod` pins `github.com/kdlbs/kandev/pluginsdk v0.5.0` and
+`package.json` pins `@kdlbs/plugin-sdk` `0.5.0`; `min_kandev_version` is
+`0.104.0`, the first Kandev release with #5438. Raise both SDKs together and
+keep `make sdk-check` passing. Do not add SDK `replace` directives or
+sibling-source builds.
 
 From the plugin root, with Go 1.26 and Node 22+:
 
 ```sh
 npm ci --ignore-scripts
-make sdk-check check-format vet test build
+make check-format vet test sdk-check build
+make coverage   # -race, cross-package Go coverage + UI lcov; fails below COVERAGE_MIN
 ```
 
+`make coverage` writes to `COVERAGE_DIR` (default `.build/coverage`, gitignored).
+Put new Go tests in packages' `_test.go` files using the existing fakes
+(`discordapi.Fake`, `kandev.Fake`, `store.MemoryHost`, the bridge `newHarness`);
+tests never reach the network. Raise `COVERAGE_MIN` only with the coverage it
+guards.
+
 Packaging needs a Kandev checkout at `.kandev-tooling-ref` in
-`.build/kandev-tooling` (see the README), then run `make verify-package-host` or
-`make verify-package`. Smoke-test artifacts only in a disposable Kandev
-instance and a test Discord server.
+`.build/kandev-tooling` (see the README), then run
+`make verify-package-host` or `make verify-package`.
+Smoke-test artifacts only in a disposable Kandev instance and a test Discord
+server.
 
 Never log config objects, the bot token, or message content. Never commit real
 tokens.

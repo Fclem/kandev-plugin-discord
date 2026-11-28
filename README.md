@@ -4,29 +4,26 @@ A [Kandev](https://github.com/kdlbs/kandev) runtime plugin that bridges Kandev
 tasks and Discord:
 
 - **One Discord text channel per Kandev task**, created when the task is
-  created and archived (or deleted) when the task is archived.
-- **Two-way chat.** Agent messages and status updates are posted to the
-  task's channel. Messages that operators post in the channel are delivered to
-  the task as user messages, following Kandev's queue and running-turn rules.
-- **Slash commands** `/status`, `/stop`, `/approve`, and `/deny`.
+  created and archived (or deleted) when the task is archived or reaches
+  the configured close state.
+- **Two-way chat.** Agent messages, status lines, and a pinned task card are
+  posted to the task's channel. Messages that operators post in the channel
+  are delivered to the task as user messages, following Kandev's queue and
+  running-turn rules.
+- **Slash commands** `/status`, `/stop`, `/approve`, `/deny`, and `/link`,
+  plus buttons on permission requests and workflow review steps. Approvals
+  act as the Kandev user who linked their Discord account.
 
-> **Status: early scaffold (v0.1.0).**
->
-> | Working today | Still to come |
-> |---|---|
-> | Settings and validation | The channel bridge |
-> | The settings-page connection test (bot token, application, Message Content intent, server membership, permissions) | Slash commands |
->
-> The design and phased plan are in [`docs/design/`](docs/design/). The
-> `/stop` (turn) and `/approve` commands depend on Kandev Host API additions
-> proposed upstream; see the design spec, section "Host API additions
-> requested".
+> **Status: feature-complete, not released (v0.1.0).** The plugin uses Host
+> APIs merged in [kdlbs/kandev#5438](https://github.com/kdlbs/kandev/pull/5438)
+> (`CancelTurn`, linked accounts, step approval, `Message.Source`), first
+> shipped in Kandev 0.104.0 and plugin SDK 0.5.0.
 
 ## Requirements
 
-- A Kandev instance at the version in `manifest.yaml`
-  (`min_kandev_version`) or newer, where you are an **admin**: plugin
-  settings are admin-only.
+- Kandev 0.104.0 or later, where you are an **admin**: plugin settings are
+  admin-only.
+- A Kandev workspace manager, to grant the plugin's Host access (step 10).
 - A Discord account that can create servers and applications.
 
 ## Discord setup, step by step
@@ -129,26 +126,88 @@ each binding. Click **Test connection**. It checks:
   invite link;
 - the required permissions; missing ones are listed by name.
 
-Every line should show ✓.
+Every line should show ✓. Below the button, each binding also shows the
+bridge's cached state (connected and provisioned, or why it stopped, for
+example `4014` when the Message Content intent is off). Once connected, the
+plugin creates the `Kandev Operator` role, the `Kandev Tasks` and `Kandev
+Archive` categories, a `#kandev-status` channel, and the slash commands, then
+one channel per open task.
 
 ### 9. Decide who may control tasks from Discord
 
 Members with the **Kandev Operator** role (configurable), or whose user IDs
-appear in **Extra operator user IDs**, can message tasks and run `/stop` and
-`/approve`. Everyone else can only read channels they can see. Anyone who can
-assign that role in your server can control the bound workspace's tasks, so
+appear in **Extra operator user IDs**, can message tasks and run `/stop`,
+`/approve`, and `/deny`. Everyone else can only read channels they can see,
+and `/status` works for anyone in a task channel. Anyone who can assign that
+role in your server can chat with and stop the bound workspace's tasks, so
 keep `Manage Roles` limited to people you trust.
+
+### 10. Grant Host access (workspace manager)
+
+In Kandev, open **Settings → Plugins → Discord → Workspace access** for each
+bound workspace and approve the requested capabilities:
+
+| Grant | Enables |
+|---|---|
+| `host.v2.read:sessions`, `host.v2.write:execution` | `/stop` (turn or task) and step approvals |
+| `host.v2.read:interactions`, `host.v2.write:interactions` | Answering permission requests |
+| `host.v2.write:human_responses` | Account linking and approvals by linked users |
+
+Without them, chat and `/status` still work; `/stop` and approvals reply that a
+workspace manager must grant access, and nothing changes in Kandev.
+
+### 11. Link your Discord account (each approver)
+
+Approvals from Discord always act as a real Kandev user. Each person who wants
+to approve from Discord:
+
+1. Opens **Settings → Plugins → Discord → Linked chat accounts** in Kandev and
+   generates a code (valid ten minutes, single use).
+2. Runs `/link <code>` in any channel of the bound Discord server.
+
+The reply confirms the Kandev user. The user or an admin can revoke the link
+on the same card. An operator who is not linked gets a link to the request in
+Kandev instead of an action. The linked Kandev user also needs session control
+in the workspace.
+
+## Using it
+
+| In a task channel | Effect |
+|---|---|
+| Post a message (operator) | Delivered to the task: ✅ sent or started, 🕒 queued behind the running turn, ⚠️ rejected with a reason, ⛔ not an operator |
+| `/status` | Task state, workflow step, sessions, queued messages, pending requests, link |
+| `/stop` (`scope: turn`, default) | Cancels the current turn; the session stays open |
+| `/stop scope: task` | Stops every session's run |
+| Buttons on a 🔐 permission request, `/approve`, `/deny` | Answers the request as your linked Kandev user |
+| **Approve** on a ⏸️ step message, or `/approve` | Approves the workflow review step like Kandev's Approve button |
+
+Messages posted while the bridge was offline are delivered when it reconnects
+if they are younger than **Deliver missed Discord messages up to (minutes)**;
+older ones get ⚠️ and are not delivered. Clarification questions are not
+answerable from Discord; the channel links to them in Kandev.
 
 ## Security notes
 
-- The token and server admin rights are equivalent to task control in the
-  bound Kandev workspace.
+- The token and server admin rights are equivalent to chat and `/stop`
+  control over the bound Kandev workspace.
+- Approvals and answers act only for a linked Kandev user with session
+  control, need the workspace grant, and are audited in Kandev as "<user> via
+  discord".
 - Agent output leaves Kandev and is posted to Discord, a third-party service.
   Agent thinking is never posted, and tool-call summaries are off by default.
 - Bot messages disable mention parsing, so agent text cannot ping
-  `@everyone`.
+  `@everyone`, roles, or users.
 - The plugin exposes no public webhook. Discord traffic uses an outbound
-  gateway connection, and the settings card uses a Kandev admin-only action.
+  gateway connection, and the settings card uses Kandev admin-only actions.
+- The plugin never logs the token, its settings, or message content.
+
+## Known limitations
+
+- Gateway-driven work (chat, commands, reconcile) has no Kandev request
+  context. On an instance with `workspace_collaboration` enabled, Kandev
+  denies those calls; the plugin reports the error.
+- The plugin cannot read a task's management claim, so `/stop` on a task
+  claimed by another plugin answers "managed elsewhere".
 
 ## Development
 
@@ -156,8 +215,34 @@ Requirements: Go 1.26 and Node 22+.
 
 ```sh
 npm ci --ignore-scripts
-make sdk-check check-format vet test build
+make check-format vet test sdk-check build
 ```
+
+`make sdk-check` checks the installed Go and frontend SDKs against
+`min_kandev_version`; build and package targets run it first.
+
+### Testing
+
+`make test` runs the Go unit tests, the UI tests (`node --test`), and the
+packaging script tests. `make coverage` runs the Go tests with `-race` and
+cross-package coverage, then the UI tests with Node's coverage (Node 22.5+),
+and writes to `COVERAGE_DIR` (default `.build/coverage`): `go.out`, an HTML
+report `go.html`, `go-func.txt`, `ui.lcov`, and a per-package
+`summary.md`. It fails when total Go statement coverage drops below
+`COVERAGE_MIN`:
+
+```sh
+make coverage                          # into .build/coverage
+make coverage COVERAGE_DIR=/tmp/cov    # elsewhere
+```
+
+Tests use in-memory fakes for Discord (`discordapi.Fake`, or an
+`httptest` server for the REST client) and Kandev (`kandev.Fake`,
+`store.MemoryHost`); none reaches the network. The `Test` workflow runs
+`make coverage` and the packaging script tests on every pull request and
+push to `main`, posts the coverage table to the job summary, and uploads
+the reports as the `coverage` artifact. The `CI` workflow checks module
+tidiness, formatting, vet, the SDK pins, and `npm audit`.
 
 Packaging needs a Kandev source checkout for the backend-owned
 `plugin-pack` tool, pinned by `.kandev-tooling-ref`:
@@ -178,14 +263,25 @@ version.
 Layout:
 
 ```
-manifest.yaml        plugin contract (id, actions, config schema)
-server/              Go backend (pluginsdk v0.1.0)
+manifest.yaml        plugin contract (id, capabilities, actions, config schema)
+server/              Go backend (pluginsdk 0.5.0)
+  bridge/            wiring: per-task scheduler, events, gateway handlers, reconcile
   config/            settings parsing and validation
-  discord/           minimal Discord REST client, permissions, invite URL
-  health/            connection test
+  discordapi/        Discord REST seam (discordgo), permissions, fake
+  gateway/           gateway supervisor: close codes, identify budget
+  store/             Host state records
+  kandev/            Host facade and fake
+  provision/         roles, categories, status channel, commands
+  channels/          task channel lifecycle
+  outbound/          Kandev → Discord mirroring and task card
+  inbound/           Discord → Kandev delivery
+  prompts/           permission and step approval prompts
+  commands/          slash commands, buttons, autocomplete
+  authz/             operator checks
+  health/            connection test and cached status
 ui/bundle.js         settings card (no build step)
 tests/               UI contract tests (node --test)
-docs/design/         spec, implementation plan, and task files
+docs/design/         requirements, system design, plan, and task files
 scripts/             package and release verifiers
 ```
 

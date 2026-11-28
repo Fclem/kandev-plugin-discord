@@ -1,0 +1,150 @@
+package bridge
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"reflect"
+	"time"
+
+	"github.com/kdlbs/kandev/pluginsdk"
+
+	"kandev-plugin-discord/server/channels"
+	"kandev-plugin-discord/server/discordapi"
+	"kandev-plugin-discord/server/outbound"
+	"kandev-plugin-discord/server/prompts"
+	"kandev-plugin-discord/server/store"
+)
+
+// stepCacheTTL bounds how long workflow step names are cached.
+const stepCacheTTL = 5 * time.Minute
+
+type stepCache struct {
+	steps   []pluginsdk.WorkflowStep
+	fetched time.Time
+}
+
+// syncActive mirrors an active channel: messages, status lines, the card,
+// and pending prompts, and returns the saved record with the error that
+// kept messages or status lines from posting (card and prompt failures are
+// only logged). It schedules the next live update while a session runs. A
+// channel Discord no longer has is marked deleted and the task re-synced,
+// which recreates it.
+func (b *Bridge) syncActive(ctx context.Context, task *pluginsdk.Task, rec store.Channel) (store.Channel, error) {
+	sessions, err := b.host.ListSessions(ctx, task.ID)
+	if err != nil {
+		return rec, fmt.Errorf("listing sessions: %w", err)
+	}
+	b.rememberSessions(task.ID, sessions)
+	pending := b.pendingCount(ctx, task.ID)
+	mirror := &outbound.Mirror{
+		API: b.api, Host: b.host, TaskURL: b.cfg.TaskURL,
+		Opts: outbound.Options{MirrorUserMessages: b.cfg.MirrorUserMessages, PostToolActivity: b.cfg.PostToolActivity},
+		Save: func(ctx context.Context, r store.Channel) error { return b.st.PutChannel(ctx, r, r.ChannelID) },
+	}
+	res, err := mirror.Sync(ctx, outbound.Input{
+		Task: task, Rec: rec, Sessions: sessions, Now: b.now(),
+		Card: outbound.CardInput{
+			Task: task, StepName: b.stepName(ctx, task), Sessions: sessions,
+			Queued: b.queued(sessions), Pending: pending, URL: b.cfg.TaskURL(task.ID),
+		},
+	})
+	next, retry := res.Rec, res.Retry
+	if !reflect.DeepEqual(next, rec) {
+		if err := b.st.PutChannel(ctx, next, next.ChannelID); err != nil {
+			log.Printf("discord: task %s: saving channel record: %v", task.ID, err)
+		}
+	}
+	if discordapi.HasCode(err, discordapi.CodeUnknownChannel) {
+		if b.markGone(ctx, task.ID, next.ChannelID) {
+			b.Kick(task.ID)
+		}
+		return channels.MarkDeleted(next, b.now()), nil
+	}
+	var cardErr *outbound.CardError
+	flushErr := err
+	if errors.As(err, &cardErr) {
+		log.Printf("discord: task %s: task card: %v", task.ID, err)
+		flushErr = nil
+	} else if err != nil {
+		log.Printf("discord: task %s: mirroring: %v", task.ID, err)
+		retry = flushRetry
+	}
+	if retry > 0 {
+		b.kickAfter(task.ID, retry)
+	}
+	poster := &prompts.Poster{API: b.api, Host: b.host, Store: b.st, TaskURL: b.cfg.TaskURL, Now: b.now}
+	if err := poster.Sync(ctx, task, next, sessions); err != nil {
+		log.Printf("discord: task %s: prompts: %v", task.ID, err)
+	}
+	if b.cfg.LiveUpdateInterval > 0 && anyRunning(sessions) {
+		b.kickAfter(task.ID, b.cfg.LiveUpdateInterval)
+	}
+	if flushErr == nil && (res.Held || anyRunning(sessions)) {
+		// The newest agent message may still be growing (it was held
+		// back); output is complete only once every session stopped.
+		flushErr = errSessionRunning
+	}
+	return next, flushErr
+}
+
+// errSessionRunning reports that a session still runs, so the mirrored
+// output may be incomplete.
+var errSessionRunning = errors.New("a session is still running")
+
+func anyRunning(sessions []pluginsdk.Session) bool {
+	for _, s := range sessions {
+		if outbound.Running(s.State) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *Bridge) queued(sessions []pluginsdk.Session) int {
+	n := 0
+	for _, s := range sessions {
+		n += b.queueCount(s.ID)
+	}
+	return n
+}
+
+// pendingCount is the number of pending interactions, or 0 when the host
+// cannot say.
+func (b *Bridge) pendingCount(ctx context.Context, taskID string) int {
+	pending, err := b.host.ListPendingInteractions(ctx, taskID)
+	if err != nil {
+		return 0
+	}
+	return len(pending)
+}
+
+// stepName resolves the task's workflow step name through a short cache.
+func (b *Bridge) stepName(ctx context.Context, task *pluginsdk.Task) string {
+	if task.WorkflowID == "" || task.WorkflowStepID == "" {
+		return ""
+	}
+	b.mu.Lock()
+	cached, ok := b.steps[task.WorkflowID]
+	b.mu.Unlock()
+	if !ok || b.now().Sub(cached.fetched) > stepCacheTTL {
+		steps, err := b.host.ListWorkflowSteps(ctx, task.WorkflowID)
+		if err != nil {
+			return ""
+		}
+		cached = stepCache{steps: steps, fetched: b.now()}
+		b.mu.Lock()
+		if b.steps == nil {
+			b.steps = map[string]stepCache{}
+		}
+		b.steps[task.WorkflowID] = cached
+		b.mu.Unlock()
+	}
+	for _, s := range cached.steps {
+		if s.ID == task.WorkflowStepID {
+			return s.Name
+		}
+	}
+	return ""
+}

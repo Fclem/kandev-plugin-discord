@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 
 let importCount = 0;
 
@@ -62,17 +63,31 @@ test("invite URL preselects the bound server", async () => {
   assert.equal(url.searchParams.get("scope"), "bot applications.commands");
 });
 
-test("parseBindings mirrors backend validation", async () => {
+test("parseBindings matches the backend on the shared fixture", async () => {
   const { mod } = await loadBundle();
-  const ok = mod.parseBindings(" ws-a = 223456789012345678\r\nws-b=323456789012345678 ");
-  assert.deepEqual(ok, {
-    bindings: [
-      { workspaceId: "ws-a", guildId: "223456789012345678" },
-      { workspaceId: "ws-b", guildId: "323456789012345678" },
-    ],
-    problems: [],
+  const cases = JSON.parse(await readFile(new URL("./fixtures/bindings.json", import.meta.url), "utf8"));
+  for (const c of cases) {
+    const got = mod.parseBindings(c.input);
+    assert.deepEqual(
+      got.bindings.map((b) => [b.workspaceId, b.guildId]),
+      c.bindings,
+      c.name,
+    );
+    assert.equal(got.problems.length, c.problems, c.name);
+  }
+});
+
+test("gatewaySummary explains the cached bridge state", async () => {
+  const { mod } = await loadBundle();
+  assert.equal(mod.gatewaySummary(null).tone, "warn");
+  assert.equal(mod.gatewaySummary({ state: "unknown" }).tone, "warn");
+  assert.deepEqual(mod.gatewaySummary({ state: "connected", bot_member: true, provisioned: true }), {
+    tone: "ok",
+    text: "Bridge connected; server provisioned.",
   });
-  const bad = mod.parseBindings("ws-a=general,ws-a=223456789012345678,ws-a=323456789012345678,ws-c=223456789012345678");
-  assert.equal(bad.bindings.length, 1);
-  assert.equal(bad.problems.length, 3);
+  assert.match(mod.gatewaySummary({ state: "connected", bot_member: false }).text, /not in this server/);
+  assert.match(mod.gatewaySummary({ state: "fatal", close_code: 4014 }).text, /Message Content intent \(4014\)/);
+  assert.match(mod.gatewaySummary({ state: "fatal", close_code: 4004 }).text, /rejected the bot token \(4004\)/);
+  assert.match(mod.gatewaySummary({ state: "not_configured", config_error: "bot_token is required" }).text, /bot_token is required/);
+  assert.equal(mod.gatewaySummary({ state: "identify_budget_exhausted", detail: "900 identifies" }).tone, "error");
 });

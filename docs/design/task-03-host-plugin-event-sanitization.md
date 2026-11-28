@@ -1,14 +1,24 @@
 ---
 id: "03-host-plugin-event-sanitization"
 title: "Strip raw_content from plugin event deliveries"
-status: pending
+status: cancelled
 wave: 2
 depends_on: []
 plan: "plan.md"
-spec: "spec.md"
+requirements:
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-003
+acceptance_criteria:
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-003.1
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-003.2
+system_design:
+  - host-controls-system-design.md
 ---
 
 # Task 03: Strip `raw_content` from plugin event deliveries
+
+> Mirrored from [`kdlbs/kandev` `docs/plans/discord-plugin/task-03-host-plugin-event-sanitization.md`](https://github.com/kdlbs/kandev/blob/9ee282c20a36b71d1d8ebae797865741bdc94a38/docs/plans/discord-plugin/task-03-host-plugin-event-sanitization.md)
+> at `9ee282c2` (2026-11-25). Upstream is canonical; other repository paths
+> in this file are relative to `kdlbs/kandev`.
 
 Repository: `kdlbs/kandev`. Use `/fix` and `/tdd`. This repairs a documented
 contract: plugins never see injected system content.
@@ -34,4 +44,17 @@ contract: plugins never see injected system content.
 - **Output contract:** summary, files changed, tests run, blockers, risks, and task/plan status update.
 
 ## Results
-Pending.
+
+**Cancelled** by the maintainers on #5420; the `raw_content` docs correction shipped in [kdlbs/kandev#5438](https://github.com/kdlbs/kandev/pull/5438) (merge commit `83cecc58`, 2026-11-23).
+
+Cancelled by the maintainer decision on
+[#5420](https://github.com/kdlbs/kandev/issues/5420#issuecomment-7083766483):
+`message.*` event payloads keep `raw_content` so existing consumers do not
+break. The field came from the web UI chat rendering (#272), and plugin
+delivery forwards the bus payload unchanged. `Messages().List` stays stripped.
+
+The stripping change was implemented and then reverted on this branch; plugin
+delivery is unchanged from `main`. Task 04 instead corrects the public docs:
+`message.*` payloads may include `raw_content` with the unstripped
+`<kandev-system>` content, and plugins that must not handle system content
+rely on `content` or `Messages().List`.

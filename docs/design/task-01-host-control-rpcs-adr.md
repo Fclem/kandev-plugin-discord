@@ -1,14 +1,24 @@
 ---
 id: "01-host-control-rpcs-adr"
 title: "ADR: plugin task control from external chat surfaces"
-status: pending
+status: done
 wave: 1
 depends_on: []
 plan: "plan.md"
-spec: "spec.md"
+requirements:
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-001
+acceptance_criteria:
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-001.1
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-001.2
+system_design:
+  - host-controls-system-design.md
 ---
 
 # Task 01: ADR for plugin task control from external chat surfaces
+
+> Mirrored from [`kdlbs/kandev` `docs/plans/discord-plugin/task-01-host-control-rpcs-adr.md`](https://github.com/kdlbs/kandev/blob/9ee282c20a36b71d1d8ebae797865741bdc94a38/docs/plans/discord-plugin/task-01-host-control-rpcs-adr.md)
+> at `9ee282c2` (2026-11-25). Upstream is canonical; other repository paths
+> in this file are relative to `kdlbs/kandev`.
 
 Repository: `kdlbs/kandev` (current `main`). Record the decision with
 `/record decision`. This task follows maintainer feedback on the upstream
@@ -53,4 +63,22 @@ approval issue; do not start it before that feedback exists.
 - **Output contract:** summary, files changed, checks run, blockers, risks, and task/plan status update.
 
 ## Results
-Pending.
+
+**Done upstream:** merged in [kdlbs/kandev#5438](https://github.com/kdlbs/kandev/pull/5438) (merge commit `83cecc58`, 2026-11-23).
+
+[`2026-11-22-plugin-external-chat-task-control`](adr-2026-11-22-plugin-external-chat-task-control.md)
+is `accepted`. It records the maintainer decision on
+[#5420](https://github.com/kdlbs/kandev/issues/5420#issuecomment-7083766483):
+`CancelTurn`; account linking gated by the `host.v2.write:human_responses`
+admin grant, with receipts minted for the linked Kandev user; one receipt
+model shared with #5202; `ApproveStep`/`GetStepApproval` on that receipt with
+Office stages `Unimplemented`; `Message.Source`; `raw_content` kept in
+`message.*` payloads with a docs correction; and the non-goals. Options (a)
+alone and (c) are recorded as rejected alternatives.
+
+- **Files:** [`adr-2026-11-22-plugin-external-chat-task-control.md`](adr-2026-11-22-plugin-external-chat-task-control.md);
+  the spec and plan were reconciled. `docs/decisions/INDEX.md` is unchanged:
+  it is a static entry page and the catalog is derived
+  (`python3 scripts/list-docs.py decisions`).
+- **Checks:** `git diff --check`; `python3 scripts/list-docs.py validate`;
+  `python3 scripts/lint-spec-files.py --all`.

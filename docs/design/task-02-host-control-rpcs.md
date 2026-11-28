@@ -1,14 +1,27 @@
 ---
 id: "02-host-control-rpcs"
 title: "Host: CancelTurn exact execution command"
-status: pending
+status: done
 wave: 2
 depends_on: ["01-host-control-rpcs-adr"]
 plan: "plan.md"
-spec: "spec.md"
+requirements:
+  - REQ-PLUGINS-CHAT-BRIDGE-HOST-002
+acceptance_criteria:
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-002.1
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-002.2
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-002.3
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-002.4
+  - AC-PLUGINS-CHAT-BRIDGE-HOST-002.5
+system_design:
+  - host-controls-system-design.md
 ---
 
 # Task 02: `CancelTurn` exact execution command
+
+> Mirrored from [`kdlbs/kandev` `docs/plans/discord-plugin/task-02-host-control-rpcs.md`](https://github.com/kdlbs/kandev/blob/9ee282c20a36b71d1d8ebae797865741bdc94a38/docs/plans/discord-plugin/task-02-host-control-rpcs.md)
+> at `9ee282c2` (2026-11-25). Upstream is canonical; other repository paths
+> in this file are relative to `kdlbs/kandev`.
 
 Repository: `kdlbs/kandev`. Use `/tdd`.
 
@@ -47,4 +60,32 @@ Repository: `kdlbs/kandev`. Use `/tdd`.
 - **Output contract:** summary, files changed, tests run, blockers, risks, and task/plan status update.
 
 ## Results
-Pending.
+
+**Done upstream:** merged in [kdlbs/kandev#5438](https://github.com/kdlbs/kandev/pull/5438) (merge commit `83cecc58`, 2026-11-23).
+
+`HostExecutionCommands(host).CancelTurn` and the `CancelTurnExact` RPC are
+admitted exactly like `StopTaskRun` (same validation, `host.v2.write:execution`
+grant, manifest digest, idempotency ledger) through a shared
+`runSessionExecutionEffect`. The backendapp adapter shares the claim fence and
+the observed session/execution check with `StopTaskRun`, interrupts only a
+`RUNNING` or `STARTING` session through `orchestrator.Service.CancelAgent`
+(which pauses queued auto-run), and reports `NO_CHANGE` otherwise. Capability
+discovery lists the method.
+
+- **Files:** `pluginsdk/exact_execution.go`, `pluginsdk/exact_execution_grpc.go`,
+  `pluginsdk/host_call_classification.go`, `plugin.proto` (+ generated),
+  `apps/backend/internal/plugins/{host_exact.go,host_exact_execution.go,exact_execution_contract.go}`,
+  `apps/backend/internal/backendapp/adapters_plugin_execution.go`, tests in
+  `pluginsdk/exact_execution_grpc_test.go`,
+  `apps/backend/internal/plugins/host_exact_execution_test.go`
+  (`TestExactCancelTurnOutcomes`: CONFLICT, APPLIED, ALREADY_APPLIED without a
+  new effect, NO_CHANGE, DENIED on a stale grant revision;
+  `TestExactCancelTurnOverWire` through the real broker transport), and
+  `apps/backend/internal/backendapp/adapters_plugin_execution_test.go`.
+  `docs/public/plugins-authoring.md` documents the command.
+- **Acceptance 3:** the end-to-end proof is the broker-transport test above;
+  the in-tree fixture plugin has no stop or cancel action to extend, and a
+  fixture action would only exercise the same path.
+- **Tests:** `cd apps/backend && go test ./internal/plugins/... ./internal/backendapp/...`
+  and `cd pluginsdk && go test ./...` passed; protos regenerated with the
+  pinned buf (`make proto` toolchain); changed-package lint ran.

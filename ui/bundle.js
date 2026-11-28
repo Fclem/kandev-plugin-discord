@@ -12,7 +12,7 @@
 
 export const PLUGIN_ID = "kandev-plugin-discord";
 
-// Must match server/discord/permissions.go RequiredPermissions.
+// Must match server/discordapi/permissions.go RequiredPermissions.
 // BigInt: bit 51 (PIN_MESSAGES) exceeds 32-bit JS bitwise operators.
 const REQUIRED_PERMISSION_BITS = [4n, 6n, 10n, 11n, 14n, 16n, 28n, 51n];
 
@@ -36,7 +36,8 @@ export function inviteUrl(applicationId, guildId) {
 const SNOWFLAKE = /^[0-9]{17,20}$/;
 
 // Mirrors server/config.ParseBindings for display; the backend stays the
-// authority and reports the same problems in connection.test.
+// authority and reports the same problems in connection.test. Both are
+// checked against tests/fixtures/bindings.json.
 export function parseBindings(raw) {
   const bindings = [];
   const problems = [];
@@ -49,6 +50,7 @@ export function parseBindings(raw) {
     const workspaceId = eq < 0 ? "" : entry.slice(0, eq).trim();
     const guildId = eq < 0 ? "" : entry.slice(eq + 1).trim();
     if (!workspaceId || !guildId) problems.push(`"${entry}" must look like <workspace id>=<server id>`);
+    else if (/[ \t]/.test(workspaceId)) problems.push(`workspace id "${workspaceId}" must not contain spaces`);
     else if (!SNOWFLAKE.test(guildId)) problems.push(`server id "${guildId}" is not a Discord ID`);
     else if (seenWorkspaces.has(workspaceId)) problems.push(`workspace ${workspaceId} is bound twice`);
     else if (seenGuilds.has(guildId)) problems.push(`server ${guildId} is bound to two workspaces`);
@@ -58,11 +60,44 @@ export function parseBindings(raw) {
       bindings.push({ workspaceId, guildId });
     }
   }
+  if (bindings.length === 0 && problems.length === 0) {
+    problems.push("workspace_guilds needs at least one <workspace id>=<server id> pair");
+  }
   return { bindings, problems };
 }
 
 const STATUS_MARK = { pass: "✓", fail: "✗", skip: "–" };
 const STATUS_CLASS = { pass: "text-green-600", fail: "text-destructive", skip: "text-muted-foreground" };
+const TONE_CLASS = { ok: "text-green-600", warn: "text-muted-foreground", error: "text-destructive" };
+
+// Summarizes the cached bridge state from connection.status (or the
+// `gateway` field of connection.test) for one binding. Pure, for tests.
+export function gatewaySummary(status) {
+  if (!status || !status.state || status.state === "unknown") {
+    return { tone: "warn", text: "Bridge has not reported yet (it starts when the plugin starts)." };
+  }
+  if (status.config_error) return { tone: "error", text: `Bridge off: settings are incomplete — ${status.config_error}` };
+  if (status.state === "fatal" && status.close_code === 4014) {
+    return { tone: "error", text: "Bridge stopped: Discord refused the Message Content intent (4014). Enable it on the Bot page, then save the settings." };
+  }
+  if (status.state === "fatal" && status.close_code === 4004) {
+    return { tone: "error", text: "Bridge stopped: Discord rejected the bot token (4004). Reset it, paste it here, and save." };
+  }
+  const detail = status.detail ? ` — ${status.detail}` : "";
+  switch (status.state) {
+    case "connected":
+      if (!status.bot_member) return { tone: "error", text: "Bridge connected, but the bot is not in this server." };
+      if (status.error) return { tone: "error", text: `Bridge connected; ${status.error}` };
+      return status.provisioned
+        ? { tone: "ok", text: "Bridge connected; server provisioned." }
+        : { tone: "warn", text: "Bridge connected; provisioning the server…" };
+    case "connecting":
+    case "reconnecting":
+      return { tone: "warn", text: `Bridge ${status.state}${detail}` };
+    default:
+      return { tone: "error", text: `Bridge ${status.state.replace(/_/g, " ")}${detail}` };
+  }
+}
 
 function makeSettingsCard(host) {
   const React = host.React;
@@ -107,8 +142,23 @@ function makeSettingsCard(host) {
 
   function BindingRow({ binding, workspaceName, applicationId }) {
     const [state, setState] = React.useState({ running: false, result: null, error: null });
+    const [gateway, setGateway] = React.useState(null);
     const abortRef = React.useRef(null);
-    React.useEffect(() => () => abortRef.current && abortRef.current.abort(), []);
+
+    // Cached bridge state: no Discord call, so it is safe on every mount.
+    React.useEffect(() => {
+      const controller = new AbortController();
+      host.api
+        .invokeAction("connection.status", { workspaceId: binding.workspaceId }, { signal: controller.signal })
+        .then((status) => setGateway(status))
+        .catch(() => {
+          if (!controller.signal.aborted) setGateway(null);
+        });
+      return () => {
+        controller.abort();
+        if (abortRef.current) abortRef.current.abort();
+      };
+    }, [binding.workspaceId]);
 
     const runTest = async () => {
       if (abortRef.current) abortRef.current.abort();
@@ -122,11 +172,13 @@ function makeSettingsCard(host) {
           { signal: controller.signal },
         );
         setState({ running: false, result, error: null });
+        if (result && result.gateway) setGateway(result.gateway);
       } catch (err) {
         if (controller.signal.aborted) return;
         setState({ running: false, result: null, error: err && err.message ? err.message : String(err) });
       }
     };
+    const summary = gatewaySummary(gateway);
 
     return h(
       "div",
@@ -162,6 +214,7 @@ function makeSettingsCard(host) {
           ),
         ),
       ),
+      h("p", { className: `mt-2 text-xs ${TONE_CLASS[summary.tone]}` }, summary.text),
       state.error ? h("p", { className: "text-destructive mt-2 text-xs" }, state.error) : null,
       state.result
         ? h(
@@ -217,7 +270,9 @@ function makeSettingsCard(host) {
           null,
           "1. Create a Discord server and a bot (see the plugin README). ",
           "2. Fill in Bot token, Application ID and one workspace=server line per workspace below, then save. ",
-          "3. Invite the bot and test each binding here.",
+          "3. Invite the bot and test each binding here. ",
+          "4. For /stop and approvals from Discord, a workspace manager grants the plugin's Host access under Workspace access; ",
+          "each person who approves from Discord links their account in “Linked chat accounts” and runs /link <code> in Discord.",
         ),
       ),
       h(

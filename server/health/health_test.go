@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"testing"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"kandev-plugin-discord/server/config"
-	"kandev-plugin-discord/server/discord"
+	"kandev-plugin-discord/server/discordapi"
 )
 
 const (
@@ -22,27 +22,27 @@ const (
 )
 
 type fakeAPI struct {
-	user      discord.User
+	user      *discordgo.User
 	userErr   error
-	app       discord.Application
+	app       *discordgo.Application
 	appErr    error
-	guilds    []discord.PartialGuild
+	guilds    []*discordgo.UserGuild
 	guildsErr error
 }
 
-func (f fakeAPI) CurrentUser(context.Context) (discord.User, error) { return f.user, f.userErr }
-func (f fakeAPI) CurrentApplication(context.Context) (discord.Application, error) {
+func (f fakeAPI) CurrentUser(context.Context) (*discordgo.User, error) { return f.user, f.userErr }
+func (f fakeAPI) CurrentApplication(context.Context) (*discordgo.Application, error) {
 	return f.app, f.appErr
 }
-func (f fakeAPI) CurrentUserGuilds(context.Context) ([]discord.PartialGuild, error) {
+func (f fakeAPI) CurrentUserGuilds(context.Context) ([]*discordgo.UserGuild, error) {
 	return f.guilds, f.guildsErr
 }
 
 func healthyAPI() fakeAPI {
 	return fakeAPI{
-		user:   discord.User{ID: "1", Username: "kandev-bot", Bot: true},
-		app:    discord.Application{ID: appID, Name: "Kandev", Flags: discord.FlagGatewayMessageContentLimited},
-		guilds: []discord.PartialGuild{{ID: guild, Name: "Team", Permissions: strconv.FormatUint(discord.RequiredPermissionBits(), 10)}},
+		user:   &discordgo.User{ID: "1", Username: "kandev-bot", Bot: true},
+		app:    &discordgo.Application{ID: appID, Name: "Kandev", Flags: int(discordapi.FlagGatewayMessageContentLimited)},
+		guilds: []*discordgo.UserGuild{{ID: guild, Name: "Team", Permissions: int64(discordapi.RequiredPermissionBits())}},
 	}
 }
 
@@ -70,7 +70,7 @@ func TestAllChecksPass(t *testing.T) {
 
 func TestRejectedTokenSkipsDependentChecks(t *testing.T) {
 	api := healthyAPI()
-	api.userErr = &discord.APIError{Status: http.StatusUnauthorized, Message: "401: Unauthorized"}
+	api.userErr = &discordapi.Error{Status: http.StatusUnauthorized, Message: "401: Unauthorized"}
 	r := Test(context.Background(), api, validConfig(), nil, "ws")
 	assert.False(t, r.OK)
 	s := statuses(r)
@@ -91,7 +91,7 @@ func TestBotNotInServerReturnsInvite(t *testing.T) {
 func TestMissingPermissionsAndIntent(t *testing.T) {
 	api := healthyAPI()
 	api.app.Flags = 0
-	api.guilds[0].Permissions = strconv.FormatUint(discord.RequiredPermissionBits()&^(1<<28), 10)
+	api.guilds[0].Permissions = int64(discordapi.RequiredPermissionBits() &^ (1 << 28))
 	r := Test(context.Background(), api, validConfig(), nil, "ws")
 	s := statuses(r)
 	assert.Equal(t, Fail, s[CheckIntent])

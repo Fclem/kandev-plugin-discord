@@ -1,4 +1,4 @@
-package discord
+package discordapi
 
 import (
 	"net/url"
@@ -14,6 +14,17 @@ type Permission struct {
 // Administrator bypasses every other permission check. The invite never asks
 // for it, but a server owner may grant it.
 const Administrator uint64 = 1 << 3
+
+// Permission bits used in channel and category overwrites (discordgo's
+// int64 representation).
+const (
+	PermAddReactions       int64 = 1 << 6
+	PermViewChannel        int64 = 1 << 10
+	PermSendMessages       int64 = 1 << 11
+	PermEmbedLinks         int64 = 1 << 14
+	PermReadMessageHistory int64 = 1 << 16
+	PermPinMessages        int64 = 1 << 51
+)
 
 // RequiredPermissions are the bot permissions the plugin needs in a bound
 // server: provisioning roles and categories, one channel per task, posting,
