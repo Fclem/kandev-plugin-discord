@@ -6,7 +6,7 @@ require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.4.2
-	github.com/kdlbs/kandev/pluginsdk v0.4.1-0.20261123163015-83cecc587a88
+	github.com/kdlbs/kandev/pluginsdk v0.5.0
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/text v0.42.0
 	google.golang.org/grpc v1.83.2

@@ -21,24 +21,22 @@ Keep `id` synchronized across `manifest.yaml`, `go.mod`, `Makefile` `BIN`, and
 `manifest.yaml` and `Makefile`. Declare only the capabilities and actions the
 code exercises.
 
-SDK state: `go.mod` pins the unreleased pluginsdk pseudo-version
-`v0.4.1-0.20261123163015-83cecc587a88` (SDK record 0.5.0, the #5438 merge),
-and `@kdlbs/plugin-sdk` stays `0.1.0` until `0.5.0` is published; then raise
-both to `0.5.0` together with `min_kandev_version` (plan "SDK gate"). Until
-then `make sdk-check` fails by design and blocks release. Do not add SDK
-`replace` directives or sibling-source builds.
+SDK state: `go.mod` pins `github.com/kdlbs/kandev/pluginsdk v0.5.0` and
+`package.json` pins `@kdlbs/plugin-sdk` `0.5.0`; `min_kandev_version` is
+`0.104.0`, the first Kandev release with #5438. Raise both SDKs together and
+keep `make sdk-check` passing. Do not add SDK `replace` directives or
+sibling-source builds.
 
 From the plugin root, with Go 1.26 and Node 22+:
 
 ```sh
 npm ci --ignore-scripts
-make check-format vet test build SDK_GATE=
-make sdk-check   # fails until SDK 0.5.0 is published
+make check-format vet test sdk-check build
 ```
 
 Packaging needs a Kandev checkout at `.kandev-tooling-ref` in
 `.build/kandev-tooling` (see the README), then run
-`make verify-package-host SDK_GATE=` or `make verify-package SDK_GATE=`.
+`make verify-package-host` or `make verify-package`.
 Smoke-test artifacts only in a disposable Kandev instance and a test Discord
 server.
 

@@ -80,28 +80,17 @@ merged contract:
 
 ## SDK gate
 
-| Item | State on 2026-11-25 |
+| Item | State on 2026-11-28 |
 |---|---|
-| `pluginsdk` with #5438 | Unreleased; latest tag `pluginsdk/v0.4.0` predates the merge. The SDK record at the merge says `sdk_version: 0.5.0`, `host_release: null`. |
-| `@kdlbs/plugin-sdk` | Latest published `0.4.0`; `0.5.0` unpublished. The plugin UI uses no 0.5.0 frontend API, so `package.json` stays on `0.1.0` until both SDKs ship 0.5.0. |
-| Kandev release with #5438 | None; latest `v0.103.1` predates the merge. |
+| `pluginsdk` with #5438 | `pluginsdk/v0.5.0` (commit `15852b70`), pinned in `go.mod`. |
+| `@kdlbs/plugin-sdk` | `0.5.0`, pinned in `package.json`. |
+| Kandev release with #5438 | `v0.104.0` (commit `15852b70`, contains `83cecc58`): `min_kandev_version: "0.104.0"`, the floor `kandev-sdk-check@v0.5.0` reports. |
 
-Development pins the Go pseudo-version
-`github.com/kdlbs/kandev/pluginsdk v0.4.1-0.20261123163015-83cecc587a88`
-(no `replace` directive). `make sdk-check` therefore fails with
-"SDK record version 0.5.0 differs from selected version 0.4.1-…" and blocks
-CI and the release workflow on purpose. Local builds and packaging use
-`SDK_GATE=` (see the `Makefile`).
-
-**Release unblock checklist** (not part of this task set):
-
-1. `pluginsdk/v0.5.0` tagged and `@kdlbs/plugin-sdk@0.5.0` published.
-2. `go get github.com/kdlbs/kandev/pluginsdk@v0.5.0`, `npm i -D -E @kdlbs/plugin-sdk@0.5.0`,
-   bump the `kandev-sdk-check` tool version in the `Makefile`.
-3. Set `min_kandev_version` to the first Kandev release that contains
-   `83cecc58` (the SDK record's `min_kandev_version` is the floor).
-4. Point `.kandev-tooling-ref` at that release's commit.
-5. `make sdk-check check-format vet test verify-package`.
+The gate is cleared: `make sdk-check` passes and runs before every build and
+package target. `.kandev-tooling-ref` points at `15852b70`. Until 2026-11-28
+the plugin pinned the pseudo-version
+`v0.4.1-0.20261123163015-83cecc587a88`, and `make sdk-check` failed by
+design.
 
 ## Host contract used (verified at `83cecc58`)
 
@@ -240,7 +229,7 @@ Wave 6:
 - [x] [task-13-plugin-settings-card](task-13-plugin-settings-card.md)
 
 Wave 7:
-- [ ] [task-14-plugin-artifact-smoke-release](task-14-plugin-artifact-smoke-release.md)  (blocked: live Discord smoke, SDK gate)
+- [ ] [task-14-plugin-artifact-smoke-release](task-14-plugin-artifact-smoke-release.md)  (blocked: live Discord smoke)
 ```
 
 ## Verification Results
@@ -251,7 +240,7 @@ Wave 7:
   settings, grants, link codes, upgrade, disable/enable, and uninstall pass
   on a disposable Kandev from `main`. Live Discord scenarios are blocked:
   this host cannot reach Discord and no test bot was provided.
-- `make sdk-check` fails by design until SDK 0.5.0 ships.
+- `make sdk-check` passes since 2026-11-28 (SDK 0.5.0, Kandev 0.104.0).
 - Adversarial review round 1 (20 findings) fixed: rebinding retires old
   channels; operator-role changes converge overwrites; step buttons bind
   the displayed step; message intake is ordered per channel with catch-up
@@ -311,8 +300,8 @@ Wave 7:
 
 ## Risks
 
-- **SDK and release gate.** See "SDK gate". Until 0.5.0 and a Kandev release
-  ship, CI's `make sdk-check` step fails by design.
+- **SDK and release gate.** Cleared (see "SDK gate"); `make sdk-check` runs
+  in CI and before every build.
 - **Background calls and workspace collaboration.** Gateway-driven Host calls
   (inbound chat, commands, reconcile) have no Kandev handler context. On an
   instance with `workspace_collaboration` enabled, conversation-domain calls

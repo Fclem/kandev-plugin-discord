@@ -14,12 +14,10 @@ author: "Fclem"
 categories: ["connector"]
 repo_url: "https://github.com/Fclem/kandev-plugin-discord"
 
-# RELEASE BLOCKER: this plugin uses Host APIs merged in kdlbs/kandev#5438
-# (CancelTurn, linked accounts, step approval, Message.Source), which no
-# Kandev release ships yet. Raise this to the first release containing
-# commit 83cecc58 together with pluginsdk/@kdlbs/plugin-sdk 0.5.0
-# (docs/design/plan.md "SDK gate"). Development hosts ignore the minimum.
-min_kandev_version: "0.99.0"
+# Host APIs merged in kdlbs/kandev#5438 (CancelTurn, linked accounts, step
+# approval, Message.Source) first ship in Kandev 0.104.0, with pluginsdk and
+# @kdlbs/plugin-sdk 0.5.0.
+min_kandev_version: "0.104.0"
 
 runtime:
   type: binary

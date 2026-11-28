@@ -39,9 +39,9 @@
 
 ### Changed
 
-- Builds against the unreleased pluginsdk pseudo-version
-  `v0.4.1-0.20261123163015-83cecc587a88`; `make sdk-check` blocks release until
-  pluginsdk and `@kdlbs/plugin-sdk` 0.5.0 and a Kandev release ship.
+- Builds against pluginsdk and `@kdlbs/plugin-sdk` 0.5.0 and requires Kandev
+  0.104.0 (`min_kandev_version`); `.kandev-tooling-ref` points at the
+  Kandev 0.104.0 commit.
 
 ### Fixed (adversarial review round 1)
 

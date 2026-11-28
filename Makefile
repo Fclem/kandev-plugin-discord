@@ -18,13 +18,11 @@ KANDEV_TOOLING ?= $(CURDIR)/.build/kandev-tooling/apps/backend
 
 # Run after npm ci so both installed SDK records and the lockfile are checked.
 sdk-check:
-	go run github.com/kdlbs/kandev/pluginsdk/cmd/kandev-sdk-check@v0.1.0 --manifest manifest.yaml --frontend-sdk node_modules/@kdlbs/plugin-sdk
+	go run github.com/kdlbs/kandev/pluginsdk/cmd/kandev-sdk-check@v0.5.0 --manifest manifest.yaml --frontend-sdk node_modules/@kdlbs/plugin-sdk
 
-# Prerequisite of build and package targets. While go.mod pins the unreleased
-# pluginsdk pseudo-version (see docs/design/plan.md "SDK gate"), sdk-check
-# fails by design and blocks release; local development may run
-# `make build SDK_GATE=` or `make verify-package-host SDK_GATE=`. CI and the
-# release workflow always run `make sdk-check` explicitly.
+# Prerequisite of build and package targets, so nothing is built against an
+# SDK the manifest does not declare. `SDK_GATE=` skips it for local
+# experiments only; CI and the release workflow run `make sdk-check`.
 SDK_GATE ?= sdk-check
 
 ## Build the plugin binary for the host platform (development use). kandev

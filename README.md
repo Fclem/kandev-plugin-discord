@@ -16,16 +16,13 @@ tasks and Discord:
 
 > **Status: feature-complete, not released (v0.1.0).** The plugin uses Host
 > APIs merged in [kdlbs/kandev#5438](https://github.com/kdlbs/kandev/pull/5438)
-> (`CancelTurn`, linked accounts, step approval, `Message.Source`). No Kandev
-> release and no published plugin SDK (0.5.0) contain them yet, so this
-> repository builds against an SDK pseudo-version and runs only on a Kandev
-> built from `main` (≥ `83cecc58`). See
-> [`docs/design/plan.md`](docs/design/plan.md) "SDK gate".
+> (`CancelTurn`, linked accounts, step approval, `Message.Source`), first
+> shipped in Kandev 0.104.0 and plugin SDK 0.5.0.
 
 ## Requirements
 
-- A Kandev instance that contains kdlbs/kandev#5438 (today: a build from
-  `main`), where you are an **admin**: plugin settings are admin-only.
+- Kandev 0.104.0 or later, where you are an **admin**: plugin settings are
+  admin-only.
 - A Kandev workspace manager, to grant the plugin's Host access (step 10).
 - A Discord account that can create servers and applications.
 
@@ -218,13 +215,11 @@ Requirements: Go 1.26 and Node 22+.
 
 ```sh
 npm ci --ignore-scripts
-make check-format vet test build SDK_GATE=
-make sdk-check   # fails until pluginsdk 0.5.0 is published (release gate)
+make check-format vet test sdk-check build
 ```
 
-`SDK_GATE=` skips the SDK compatibility check for local builds while
-`go.mod` pins the unreleased pluginsdk pseudo-version; CI and the release
-workflow always run `make sdk-check`.
+`make sdk-check` checks the installed Go and frontend SDKs against
+`min_kandev_version`; build and package targets run it first.
 
 Packaging needs a Kandev source checkout for the backend-owned
 `plugin-pack` tool, pinned by `.kandev-tooling-ref`:
@@ -233,8 +228,8 @@ Packaging needs a Kandev source checkout for the backend-owned
 git clone --filter=blob:none --no-checkout https://github.com/kdlbs/kandev.git .build/kandev-tooling
 git -C .build/kandev-tooling sparse-checkout set apps/backend pluginsdk
 git -C .build/kandev-tooling checkout "$(cat .kandev-tooling-ref)"
-make verify-package-host SDK_GATE=   # host platform only
-make verify-package SDK_GATE=        # all five platforms
+make verify-package-host   # host platform only
+make verify-package        # all five platforms
 ```
 
 Install the archive into a **disposable** Kandev instance and a test Discord
@@ -246,7 +241,7 @@ Layout:
 
 ```
 manifest.yaml        plugin contract (id, capabilities, actions, config schema)
-server/              Go backend (pluginsdk pseudo-version of 0.5.0)
+server/              Go backend (pluginsdk 0.5.0)
   bridge/            wiring: per-task scheduler, events, gateway handlers, reconcile
   config/            settings parsing and validation
   discordapi/        Discord REST seam (discordgo), permissions, fake
