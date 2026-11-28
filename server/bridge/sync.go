@@ -211,8 +211,13 @@ func (b *Bridge) accessRetryPoint(workspaceID string) time.Time {
 // lostAccess records that Discord forbids the bot a channel (its overwrite
 // or role permissions were removed, or the bot left the guild): the record
 // becomes failed, so nothing is sent to the channel until the next retry
-// point (accessRetryPoint). #kandev-status says so once per outage.
+// point (accessRetryPoint). The channel must catch up before its next live
+// message: messages posted meanwhile stay in its history. #kandev-status
+// says so once per outage.
 func (b *Bridge) lostAccess(ctx context.Context, rec store.Channel, previousChannelID string, g store.Guild, err error) {
+	b.mu.Lock()
+	b.caughtUp[rec.ChannelID] = -1
+	b.mu.Unlock()
 	first := rec.AccessLostAt.IsZero()
 	if first {
 		rec.AccessLostAt = b.now()

@@ -153,3 +153,12 @@
   every minute.
 - Installing the gateway log observer no longer races a handshake that is
   still finishing in the background (found while verifying this round).
+
+### Fixed (adversarial review round 9)
+
+- Messages posted in a channel while the bot had no access are delivered
+  once access returns, before later ones.
+- Losing access in the middle of a catch-up no longer delivers messages
+  twice.
+- A recreated channel is not announced as recovered, and its own outages
+  are announced.

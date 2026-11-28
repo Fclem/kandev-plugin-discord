@@ -314,6 +314,11 @@ Wave 7:
   guild — whether or not its task still wants it, so a closed task's
   channel is archived; `#kandev-status` gets one note per outage and one
   when access returns.
+- Adversarial review round 9 (3 findings) fixed: losing access marks the
+  channel for catch-up, so messages posted meanwhile are delivered once
+  access returns in the same process; a 403 mid-catch-up keeps the cursor
+  the catch-up saved; `AccessLostAt` is cleared with the channel (deleted,
+  recreated, archived, reopened).
 
 ## Risks
 

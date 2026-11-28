@@ -127,12 +127,13 @@ func (b *Bridge) ensureCaughtUp(ctx context.Context, rec store.Channel, guild st
 	if !b.needsCatchUp(rec.ChannelID) {
 		return true
 	}
-	if _, err := b.inboundHandler(guild).CatchUp(ctx, rec, until); err != nil {
+	if caught, err := b.inboundHandler(guild).CatchUp(ctx, rec, until); err != nil {
 		log.Printf("discord: catching up channel of task %s: %v", rec.TaskID, err)
 		if discordapi.IsForbidden(err) {
 			// The bot cannot read the channel's history: retrying every
-			// minute would only pile up invalid requests.
-			b.lostAccess(ctx, rec, rec.ChannelID, guild, err)
+			// minute would only pile up invalid requests. The record keeps
+			// the cursor the catch-up saved so far.
+			b.lostAccess(ctx, caught, caught.ChannelID, guild, err)
 			return false
 		}
 		b.retryCatchUp(rec.ChannelID)

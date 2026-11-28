@@ -887,3 +887,108 @@ func TestForbiddenCatchUpMarksTheChannelFailed(t *testing.T) {
 	h.wait()
 	assert.Equal(t, store.StatusFailed, h.channel(t, "1").Status, "a 403 on the channel marks it failed (system design)")
 }
+func sentTexts(h *harness) []string {
+	var out []string
+	for _, s := range h.host.Sent {
+		out = append(out, s.Text)
+	}
+	return out
+}
+
+// A message posted while a channel is failed for lost access is caught up
+// when access returns, before later live messages.
+func TestMessageDuringLostAccessIsCaughtUpOnRecovery(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	ctx := context.Background()
+	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
+	member := &discordgo.Member{Roles: []string{g.OperatorRoleID}}
+	h.api.Members[author.ID] = member
+	h.b.ensureCaughtUp(ctx, rec, g, "") // caught up since READY
+
+	// Outbound post forbidden: channel failed.
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", AuthorType: "agent", Type: "message", Content: "answer", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.api.FailNext("MessageSend", &discordapi.Error{Status: 403, Code: 50013, Message: "Missing Permissions"})
+	h.event(t, "e1", "turn.completed", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+
+	// The operator writes while the channel is failed.
+	stored := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(-time.Second)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "during outage", Author: author})
+	live := *stored
+	live.Member = member
+	h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: &live})
+	h.wait()
+
+	// Permissions restored; the periodic pass provisions and reactivates.
+	*h.clock = h.clock.Add(5 * time.Minute)
+	h.b.reconcileAll()
+	h.wait()
+	require.Equal(t, store.StatusActive, h.channel(t, "1").Status)
+
+	stored2 := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(-time.Second)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "after", Author: author})
+	live2 := *stored2
+	live2.Member = member
+	h.b.onMessageCreate(ctx, &discordgo.MessageCreate{Message: &live2})
+	h.wait()
+	assert.Equal(t, []string{"alice (Discord): during outage", "alice (Discord): after"}, sentTexts(h))
+}
+
+// A 403 in the middle of a catch-up keeps the cursor the catch-up saved,
+// so delivered messages are not delivered again after the retry.
+func TestForbiddenMidCatchUpKeepsTheSavedCursor(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	author := &discordgo.User{ID: "500000000000000001", Username: "alice"}
+	h.api.Members[author.ID] = &discordgo.Member{Roles: []string{g.OperatorRoleID}}
+	first := h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(-2 * time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "first", Author: author})
+	h.api.AddMessage(&discordgo.Message{ID: snowflakeAt(h.clock.Add(-time.Minute)), ChannelID: rec.ChannelID, GuildID: guildID, Content: "second", Author: author})
+	h.b.mu.Lock()
+	h.b.caughtUp[rec.ChannelID] = -1
+	h.b.mu.Unlock()
+	h.api.FailNext("GuildMember", nil)
+	h.api.FailNext("GuildMember", &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"})
+	h.b.catchUp("1", rec.ChannelID)
+	h.wait()
+	got := h.channel(t, "1")
+	require.Equal(t, store.StatusFailed, got.Status)
+	assert.Equal(t, first.ID, got.InboundCursor, "the delivered message stays behind the cursor")
+
+	*h.clock = h.clock.Add(5 * time.Minute)
+	h.b.reconcileAll()
+	h.wait()
+	assert.Equal(t, []string{"alice (Discord): first", "alice (Discord): second"}, sentTexts(h), "nothing is delivered twice")
+}
+
+// A channel recreated after a lost-access channel was deleted is not
+// announced as recovered.
+func TestRecreatedChannelIsNotAnnouncedAsRecovered(t *testing.T) {
+	h := newHarness(t)
+	h.addTask("1", "Fix login")
+	h.ready(t)
+	rec := h.channel(t, "1")
+	g, _ := h.b.guild(wsID)
+	h.host.AddMessage(pluginsdk.Message{ID: "m1", TaskID: "1", AuthorType: "agent", Type: "message", Content: "answer", CreatedAt: "2026-11-25T12:00:01Z"})
+	h.api.FailNext("MessageSend", &discordapi.Error{Status: 403, Code: 50001, Message: "Missing Access"})
+	h.event(t, "e1", "turn.completed", map[string]any{"task_id": "1"})
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+
+	// An admin deletes the inaccessible channel; the task gets a new one.
+	h.b.onChannelDelete(context.Background(), &discordgo.Channel{ID: rec.ChannelID})
+	h.wait()
+	delete(h.api.Channels, rec.ChannelID)
+	h.reconcile(t)
+	h.reconcile(t) // catches the new channel up
+	h.event(t, "e2", "turn.completed", map[string]any{"task_id": "1"})
+	got := h.channel(t, "1")
+	require.Equal(t, store.StatusActive, got.Status)
+	require.NotEqual(t, rec.ChannelID, got.ChannelID)
+	for _, n := range h.texts(g.StatusChannelID) {
+		assert.NotContains(t, n, "access to <#"+got.ChannelID+"> again", "a new channel never lost access")
+	}
+}

@@ -162,11 +162,12 @@ func (m *Manager) abandon(ctx context.Context, in Input) (Result, error) {
 	return Result{Rec: rec, Changed: true, RetryAfter: time.Second}, nil
 }
 
-// MarkDeleted records that Discord deleted the channel.
+// MarkDeleted records that Discord deleted the channel. Its access state
+// goes with it: a recreated channel starts fresh.
 func MarkDeleted(rec store.Channel, now time.Time) store.Channel {
 	rec.Status = store.StatusDeleted
 	rec.LastError = "channel was deleted in Discord"
-	rec.UpdatedAt = now
+	rec.UpdatedAt, rec.AccessLostAt = now, time.Time{}
 	return rec
 }
 
@@ -280,7 +281,7 @@ func (m *Manager) create(ctx context.Context, in Input) (Result, error) {
 		return err
 	})
 	if err == nil {
-		rec.ChannelID, rec.Status, rec.LastError, rec.Creation = ch.ID, store.StatusActive, "", nil
+		rec.ChannelID, rec.Status, rec.LastError, rec.Creation, rec.AccessLostAt = ch.ID, store.StatusActive, "", nil, time.Time{}
 		// An adopted channel carries the name, topic, and overwrites of the
 		// original request: rename converges the name, and a RolesKey that
 		// is not the guild's makes Converge rewrite the overwrites before
@@ -420,7 +421,8 @@ func (m *Manager) move(ctx context.Context, in Input, archive bool) (Result, err
 		}
 		return Result{Rec: rec}, fmt.Errorf("%s channel: %w", verb, err)
 	}
-	rec.RolesKey, rec.UpdatedAt, rec.CloseRequestedAt = RolesKey(in.Guild), in.Now, time.Time{}
+	// The move worked, so the bot has access (again).
+	rec.RolesKey, rec.UpdatedAt, rec.CloseRequestedAt, rec.AccessLostAt = RolesKey(in.Guild), in.Now, time.Time{}, time.Time{}
 	if !archive {
 		rec.Status, rec.ClosedAt, rec.DeleteAfter = store.StatusActive, time.Time{}, time.Time{}
 		return Result{Rec: rec, Changed: true}, nil
@@ -437,7 +439,7 @@ func (m *Manager) remove(ctx context.Context, in Input, why string) (Result, err
 	if err := m.API.ChannelDelete(ctx, rec.ChannelID); err != nil && !discordapi.IsGone(err) {
 		return Result{Rec: rec}, fmt.Errorf("deleting channel (%s): %w", why, err)
 	}
-	rec.Status, rec.UpdatedAt, rec.LastError = store.StatusDeleted, in.Now, ""
+	rec.Status, rec.UpdatedAt, rec.LastError, rec.AccessLostAt = store.StatusDeleted, in.Now, "", time.Time{}
 	return Result{Rec: rec, Changed: true}, nil
 }
 
