@@ -297,6 +297,10 @@ Wave 7:
   aborted session never dials (discordgo deadlocks in Open on an op 7
   before READY); a 401 from gateway discovery halts; a card returned by a
   retried post with older contents is edited; status lines carry nonces.
+- Adversarial review round 6 (2 findings) fixed: a status-line batch
+  advances its nonce counter only once fully posted, so a partly posted
+  batch retries with the same nonces; failed and capacity-blocked
+  creations settle the creation inventory.
 
 ## Risks
 

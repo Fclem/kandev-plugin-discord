@@ -119,8 +119,18 @@ func (b *Bridge) reconcileCreations(ctx context.Context, binding config.Binding,
 		if err != nil {
 			continue
 		}
-		settled := !found || rec.Status == store.StatusDeleted
-		if found && rec.Status == store.StatusArchived && rec.ChannelID != "" {
+		// Settled: nothing was created (deleted, failed, or capacity
+		// blocked; create clears its intent for those), or the channel is
+		// archived and reachable through the index.
+		settled := !found
+		switch rec.Status {
+		case store.StatusDeleted, store.StatusFailed, store.StatusCapacityBlocked:
+			settled = true
+		case store.StatusArchived:
+			if rec.ChannelID == "" {
+				settled = true
+				break
+			}
 			owner, indexed, err := b.st.ChannelIndex(ctx, rec.ChannelID)
 			if err != nil {
 				continue

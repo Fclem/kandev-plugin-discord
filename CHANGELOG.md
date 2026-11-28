@@ -131,3 +131,8 @@
   with the token-rejected state instead of retrying forever.
 - A card or status line retried after a lost reply is neither stale nor
   duplicated.
+
+### Fixed (adversarial review round 6)
+
+- A partly posted batch of status lines is not reposted on retry.
+- A failed channel creation of a deleted task stops being retried.

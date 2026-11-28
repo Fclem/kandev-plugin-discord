@@ -697,3 +697,34 @@ func TestDeletedTaskChannelIsClosedEvenIfItsAdoptionLostTheIndex(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, pending)
 }
+
+// lostCreatingDelete fails the first delete of task 1's creation entry.
+type lostCreatingDelete struct {
+	*store.MemoryHost
+	failed bool
+}
+
+func (f *lostCreatingDelete) DeleteState(ctx context.Context, scope, scopeID, key string) error {
+	if key == "creating:1" && !f.failed {
+		f.failed = true
+		return errors.New("lost delete")
+	}
+	return f.MemoryHost.DeleteState(ctx, scope, scopeID, key)
+}
+
+func TestFailedCreationOfAVanishedTaskLeavesTheInventory(t *testing.T) {
+	h := newHarness(t)
+	h.st = store.New(&lostCreatingDelete{MemoryHost: h.mem})
+	h.b = New(Deps{Config: h.b.cfg, API: h.api, Host: h.host, Store: h.st, Now: h.b.now})
+	h.ready(t)
+	h.addTask("1", "One")
+	h.api.FailNext("GuildChannelCreate", &discordapi.Error{Status: 403, Code: 50013})
+	h.reconcile(t)
+	require.Equal(t, store.StatusFailed, h.channel(t, "1").Status)
+
+	delete(h.host.Tasks, "1")
+	h.reconcile(t)
+	pending, err := h.st.CreatingTasks(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, pending, "a failed creation is settled")
+}

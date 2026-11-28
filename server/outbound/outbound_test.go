@@ -400,3 +400,19 @@ func TestStatusLineRetriedAfterALostReplyIsPostedOnce(t *testing.T) {
 	f.sync(t, f.host.Sessions["t1"], time.Now())
 	assert.Len(t, f.texts(), 3)
 }
+
+func TestPartlyPostedStatusBatchIsNotRepostedOnRetry(t *testing.T) {
+	f := newMirror(t)
+	sessions := []pluginsdk.Session{
+		{ID: "s1", State: "RUNNING", AgentDisplayName: "Claude", StartedAt: "2026-11-25T10:00:00Z"},
+		{ID: "s2", State: "RUNNING", AgentDisplayName: "Codex", StartedAt: "2026-11-25T10:00:01Z"},
+	}
+	f.host.Sessions["t1"] = sessions
+	f.api.FailNext("MessageSend", nil)                            // line 1 posts
+	f.api.FailNext("MessageSend", &discordapi.Error{Status: 503}) // line 2 fails
+	res, err := f.m.Sync(context.Background(), Input{Task: f.task, Rec: f.rec, Sessions: sessions, Now: time.Now(), Card: CardInput{Task: f.task}})
+	require.Error(t, err)
+	f.rec = res.Rec // saved, as syncActive does
+	f.sync(t, sessions, time.Now())
+	assert.Equal(t, []string{"▶️ **Claude** is working.", "▶️ **Codex** is working."}, f.texts())
+}
