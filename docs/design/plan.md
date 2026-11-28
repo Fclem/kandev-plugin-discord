@@ -333,6 +333,11 @@ Wave 7:
   follows the current `archive_retention_days` for channels already
   archived; the "deleted in Discord" note fires only for channels Discord
   deleted, not for policy deletes.
+- Adversarial review round 14 (2 findings) fixed: duration settings are
+  bounded (retention ≤ 36500 days, catch-up ≤ 525600 minutes) and an
+  overlong retention keeps the channel instead of overflowing its deadline;
+  a parent read error other than NotFound skips the subtask's rename and
+  topic update.
 
 ## Risks
 

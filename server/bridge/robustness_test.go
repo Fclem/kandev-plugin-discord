@@ -15,11 +15,14 @@ import (
 	"github.com/kdlbs/kandev/pluginsdk"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"kandev-plugin-discord/server/channels"
 	"kandev-plugin-discord/server/config"
 	"kandev-plugin-discord/server/discordapi"
 	"kandev-plugin-discord/server/gateway"
+	"kandev-plugin-discord/server/kandev"
 	"kandev-plugin-discord/server/store"
 )
 
@@ -1064,4 +1067,38 @@ func TestReopenedChannelRepostsLivePrompts(t *testing.T) {
 	msg := h.api.Message(rec.ChannelID, stored.Items[0].MessageID)
 	require.NotNil(t, msg)
 	assert.NotEmpty(t, msg.Components, "the pending request's prompt in the reopened channel has live buttons")
+}
+
+type flakyParent struct {
+	*kandev.Fake
+	failID string
+}
+
+func (f *flakyParent) GetTask(ctx context.Context, id string) (*pluginsdk.Task, error) {
+	if id == f.failID {
+		return nil, status.Error(codes.Unavailable, "transient")
+	}
+	return f.Fake.GetTask(ctx, id)
+}
+
+// A transient failure reading the parent leaves the subtask channel topic
+// alone instead of dropping its "subtask of" part.
+func TestTransientParentReadKeepsTheSubtaskTopic(t *testing.T) {
+	h := newHarness(t)
+	flaky := &flakyParent{Fake: h.host}
+	h.b.host = flaky
+	h.ready(t)
+	h.addTask("1", "Parent")
+	parent := "1"
+	h.host.AddTask(pluginsdk.Task{ID: "2", WorkspaceID: wsID, Identifier: "KAN-2", Title: "Child", State: "IN_PROGRESS", ParentID: &parent, CreatedAt: "2026-11-25T11:59:00Z"})
+	h.event(t, "e1", "task.created", map[string]any{"task_id": "2"})
+	rec := h.channel(t, "2")
+	require.Contains(t, h.api.Channels[rec.ChannelID].Topic, "subtask of KAN-1")
+
+	*h.clock = h.clock.Add(11 * time.Minute)
+	h.api.ResetCalls()
+	flaky.failID = "1"
+	h.event(t, "e2", "task.updated", map[string]any{"task_id": "2"})
+	assert.Empty(t, h.api.CallsTo("ChannelEdit"), "transient parent read edited the channel")
+	assert.Contains(t, h.api.Channels[rec.ChannelID].Topic, "subtask of KAN-1")
 }

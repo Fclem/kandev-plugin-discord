@@ -173,6 +173,7 @@ func TestParseRejectsInvalidOptionalFields(t *testing.T) {
 	raw["closed_channel_action"] = "burn"
 	raw["archive_retention_days"] = float64(-1)
 	raw["live_update_interval_seconds"] = 2.5
+	raw["inbound_catchup_max_age_minutes"] = float64(600000)
 	_, err := Parse(raw)
 	require.Error(t, err)
 	for _, want := range []string{
@@ -180,11 +181,25 @@ func TestParseRejectsInvalidOptionalFields(t *testing.T) {
 		"kandev_base_url must be an absolute http(s) URL",
 		`close_trigger must be "archived" or "terminal"`,
 		`closed_channel_action must be "archive" or "delete"`,
-		"archive_retention_days must be a non-negative integer",
-		"live_update_interval_seconds must be a non-negative integer",
+		"archive_retention_days must be a whole number from 0 to 36500",
+		"live_update_interval_seconds must be a whole number from 0 to 2147483647",
+		"inbound_catchup_max_age_minutes must be a whole number from 0 to 525600",
 	} {
 		assert.Contains(t, err.Error(), want)
 	}
+}
+
+// A "keep forever" retention far beyond 36500 days would overflow the
+// deletion deadline into the past and delete every archived channel.
+func TestParseRejectsRetentionThatWouldOverflow(t *testing.T) {
+	raw := validRaw()
+	raw["archive_retention_days"] = float64(999999)
+	_, err := Parse(raw)
+	require.ErrorContains(t, err, "archive_retention_days must be a whole number from 0 to 36500")
+	raw["archive_retention_days"] = float64(36500)
+	cfg, err := Parse(raw)
+	require.NoError(t, err)
+	assert.Equal(t, 36500, cfg.ArchiveRetentionDays)
 }
 
 func TestIsOperatorUser(t *testing.T) {

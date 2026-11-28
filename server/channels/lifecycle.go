@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -59,7 +60,10 @@ type Input struct {
 	Rec              store.Channel
 	Guild            store.Guild
 	ParentIdentifier string
-	Now              time.Time
+	// ParentUnknown means the parent task could not be read: the topic is
+	// left alone rather than rewritten without its "subtask of" part.
+	ParentUnknown bool
+	Now           time.Time
 }
 
 // Result is the new record and when to look again.
@@ -109,7 +113,7 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 		if err != nil || res.Rec.Status != store.StatusActive {
 			return res, err
 		}
-		next, err := m.rename(ctx, Input{Task: in.Task, Rec: res.Rec, Guild: in.Guild, ParentIdentifier: in.ParentIdentifier, Now: in.Now})
+		next, err := m.rename(ctx, Input{Task: in.Task, Rec: res.Rec, Guild: in.Guild, ParentIdentifier: in.ParentIdentifier, ParentUnknown: in.ParentUnknown, Now: in.Now})
 		next.Changed = next.Changed || res.Changed
 		return next, err
 	case store.StatusArchived:
@@ -140,10 +144,13 @@ func (m *Manager) Sync(ctx context.Context, in Input) (Result, error) {
 }
 
 // deleteAfter is when a channel archived at closedAt is deleted under the
-// current retention setting; zero keeps it.
+// current retention setting; zero keeps it. config.Parse bounds the
+// setting; a retention too long for a time.Duration keeps the channel
+// rather than wrapping the deadline into the past.
 func (m *Manager) deleteAfter(closedAt time.Time) time.Time {
-	if days := m.Config.ArchiveRetentionDays; days > 0 {
-		return closedAt.Add(time.Duration(days) * 24 * time.Hour)
+	const day = 24 * time.Hour
+	if days := m.Config.ArchiveRetentionDays; days > 0 && int64(days) <= int64(math.MaxInt64/day) {
+		return closedAt.Add(time.Duration(days) * day)
 	}
 	return time.Time{}
 }
@@ -386,7 +393,7 @@ func initialCursor(task *pluginsdk.Task, now time.Time) string {
 func (m *Manager) rename(ctx context.Context, in Input) (Result, error) {
 	rec := in.Rec
 	topic := m.topic(in)
-	if in.Task.Title == rec.SyncedTitle && topic == rec.SyncedTopic {
+	if in.ParentUnknown || (in.Task.Title == rec.SyncedTitle && topic == rec.SyncedTopic) {
 		return Result{Rec: rec}, nil
 	}
 	if wait := RenameInterval - in.Now.Sub(rec.LastRenamedAt); !rec.LastRenamedAt.IsZero() && wait > 0 {

@@ -196,3 +196,12 @@
   change: `0` keeps them, and a lower value deletes old archives sooner.
 - A channel the plugin deleted by policy is recreated without a note
   claiming it was deleted in Discord.
+
+### Fixed (adversarial review round 14)
+
+- `archive_retention_days` above 36500 (and
+  `inbound_catchup_max_age_minutes` above 525600) are rejected as invalid
+  settings: a huge "keep forever" value overflowed the deletion date into
+  the past and deleted every archived channel.
+- A subtask channel's topic is left alone when its parent task cannot be
+  read, instead of being rewritten without "subtask of".

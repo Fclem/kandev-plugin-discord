@@ -116,7 +116,8 @@ func (b *Bridge) syncTask(ctx context.Context, taskID string) {
 	}
 	mgr := b.channelManager()
 	input := func(r store.Channel) channels.Input {
-		return channels.Input{Task: task, Rec: r, Guild: g, ParentIdentifier: b.parentIdentifier(ctx, task), Now: b.now()}
+		parent, known := b.parentIdentifier(ctx, task)
+		return channels.Input{Task: task, Rec: r, Guild: g, ParentIdentifier: parent, ParentUnknown: !known, Now: b.now()}
 	}
 	switch {
 	case task != nil && rec.Status == store.StatusActive && !channels.WantOpen(b.cfg, task):
@@ -352,18 +353,21 @@ func (b *Bridge) forgetPrompts(ctx context.Context, taskID string) {
 	}
 }
 
-func (b *Bridge) parentIdentifier(ctx context.Context, task *pluginsdk.Task) string {
+// parentIdentifier names a subtask's parent for the channel topic. known is
+// false when the parent could not be read (a Host error other than
+// NotFound): the topic must not be rewritten from a guess.
+func (b *Bridge) parentIdentifier(ctx context.Context, task *pluginsdk.Task) (id string, known bool) {
 	if task == nil || task.ParentID == nil || *task.ParentID == "" {
-		return ""
+		return "", true
 	}
 	parent, err := b.host.GetTask(ctx, *task.ParentID)
 	if err != nil {
-		return ""
+		return "", kandev.IsNotFound(err)
 	}
 	if parent.Identifier != "" {
-		return parent.Identifier
+		return parent.Identifier, true
 	}
-	return parent.Title
+	return parent.Title, true
 }
 
 // onChannelDelete marks a task channel deleted when Discord deletes it; the

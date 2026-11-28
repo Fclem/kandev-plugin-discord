@@ -74,6 +74,12 @@ func IsSnowflake(s string) bool { return snowflake.MatchString(s) }
 // carries every field that parsed, even when err is non-nil.
 func Parse(raw map[string]any) (Config, error) {
 	p := parser{raw: raw}
+	// Bounds of the duration settings: a century of retention, a year of
+	// catch-up.
+	const (
+		maxArchiveRetentionDays  = 36500
+		maxInboundCatchupMinutes = 525600
+	)
 	cfg := Config{
 		BotToken:              strings.TrimSpace(p.str("bot_token")),
 		ApplicationID:         strings.TrimSpace(p.str("application_id")),
@@ -81,11 +87,11 @@ func Parse(raw map[string]any) (Config, error) {
 		ViewerRoleName:        strings.TrimSpace(p.str("viewer_role_name")),
 		CloseTrigger:          CloseTrigger(p.enum("close_trigger", string(CloseOnArchived), string(CloseOnArchived), string(CloseOnTerminal))),
 		ClosedChannelAction:   ClosedChannelAction(p.enum("closed_channel_action", string(ClosedArchive), string(ClosedArchive), string(ClosedDelete))),
-		ArchiveRetentionDays:  p.nonNegativeInt("archive_retention_days", 30),
+		ArchiveRetentionDays:  p.boundedInt("archive_retention_days", 30, maxArchiveRetentionDays),
 		MirrorUserMessages:    p.boolean("mirror_user_messages", true),
 		PostToolActivity:      p.boolean("post_tool_activity", false),
-		LiveUpdateInterval:    time.Duration(p.nonNegativeInt("live_update_interval_seconds", 30)) * time.Second,
-		InboundCatchupMaxAge:  time.Duration(p.nonNegativeInt("inbound_catchup_max_age_minutes", 15)) * time.Minute,
+		LiveUpdateInterval:    time.Duration(p.boundedInt("live_update_interval_seconds", 30, math.MaxInt32)) * time.Second,
+		InboundCatchupMaxAge:  time.Duration(p.boundedInt("inbound_catchup_max_age_minutes", 15, maxInboundCatchupMinutes)) * time.Minute,
 		IncludeEphemeralTasks: p.boolean("include_ephemeral_tasks", false),
 	}
 	if cfg.OperatorRoleName == "" {
@@ -224,9 +230,10 @@ func (p *parser) boolean(key string, def bool) bool {
 	return b
 }
 
-// nonNegativeInt reads a JSON number (float64 over the wire) that must be a
-// whole, non-negative value.
-func (p *parser) nonNegativeInt(key string, def int) int {
+// boundedInt reads a JSON number (float64 over the wire) that must be a
+// whole value from 0 to most. The bound keeps durations derived from it far
+// from time.Duration's overflow (about 106,751 days).
+func (p *parser) boundedInt(key string, def, most int) int {
 	v, ok := p.raw[key]
 	if !ok || v == nil {
 		return def
@@ -242,8 +249,8 @@ func (p *parser) nonNegativeInt(key string, def int) int {
 	default:
 		f = -1
 	}
-	if f < 0 || f != math.Trunc(f) || f > math.MaxInt32 {
-		p.fail(fmt.Errorf("%s must be a non-negative integer", key))
+	if f < 0 || f != math.Trunc(f) || f > float64(most) {
+		p.fail(fmt.Errorf("%s must be a whole number from 0 to %d", key, most))
 		return def
 	}
 	return int(f)

@@ -280,3 +280,16 @@ func TestPolicyDeleteThenReopenIsNotReportedAsDeletedInDiscord(t *testing.T) {
 		assert.NotContains(t, n, "deleted in Discord")
 	}
 }
+
+// A retention too long for a time.Duration keeps the channel instead of
+// wrapping its deadline into the past.
+func TestOverlongRetentionNeverDeletes(t *testing.T) {
+	f := newFixture(t, func(c *config.Config) { c.ArchiveRetentionDays = 999999 })
+	rec := f.sync(t, task(), store.Channel{}).Rec
+	rec = f.sync(t, archivedTask(), rec).Rec
+	require.Equal(t, store.StatusArchived, rec.Status)
+	f.now = f.now.Add(time.Minute)
+	rec = f.sync(t, archivedTask(), rec).Rec
+	assert.Equal(t, store.StatusArchived, rec.Status)
+	assert.NotNil(t, f.api.Channels[rec.ChannelID])
+}
